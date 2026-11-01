@@ -18,19 +18,25 @@ password.
 Open **Google Auth Platform** (APIs & Services → OAuth consent screen) and
 click **Get started**.
 
-1. **App information:** name **Mail**. Use your own address as the support
-   email.
+1. **App information:** a name such as **Ana's Mail**. Google rejects plain
+   "Mail" as an app name. Use your own address as the support email.
 2. **Audience:** **External**.
 3. **Contact information:** your address. Agree to the policy and create.
-4. **Data Access → Add or remove scopes:** add
-   `https://www.googleapis.com/auth/gmail.modify` and save.
-5. **Audience → Test users:** add your Gmail address.
+4. **Data Access → Add or remove scopes:** paste
+   `https://www.googleapis.com/auth/gmail.modify` under *Manually add scopes*,
+   click **Add to table**, then **Update** and **Save**.
+5. **Branding → App domain:** Google won't let you publish without a home
+   page and a privacy policy link. Your fork on GitHub works for both, for
+   example `https://github.com/you/mail` and
+   `https://github.com/you/mail#privacy`. Add `github.com` under
+   **Authorized domains** and save.
 
 ## 3. Create the Desktop client
 
 1. **Clients → Create client**, application type **Desktop app**, name
    **Mail for Mac**.
-2. Download the JSON. It is named like `client_secret_….json`.
+2. Click **Download JSON** before closing the dialog: Google shows the client
+   secret only once. The file is named like `client_secret_….json`.
 
 Keep the file out of git. The repository's `.gitignore` already ignores
 `client_secret*.json`.
@@ -54,7 +60,7 @@ Your browser opens Google's sign-in:
 
 1. Choose your account.
 2. Google shows **"Google hasn't verified this app"**. That is expected for
-   your own unverified app. Click **Advanced → Go to Mail (unsafe)**.
+   your own unverified app. Click **Advanced → Go to <your app name> (unsafe)**.
 3. Allow Mail to read, compose and organize your email.
 4. The tab says *Mail is signed in*. Back in the terminal:
 
