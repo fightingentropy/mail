@@ -7,9 +7,12 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{
+    Deserialize,
+    de::{DeserializeOwned, IgnoredAny},
+};
 
-use super::{ApiLabel, ApiMessage, GmailApi, HistoryPage, IdPage, Profile};
+use super::{ApiLabel, ApiMessage, GmailApi, HistoryPage, IdPage, Outcome, Profile};
 use crate::auth::{self, AccessToken, OAuthClient};
 
 const API: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -28,6 +31,9 @@ const LABELS_UNITS: u32 = 1;
 const LIST_UNITS: u32 = 5;
 const MESSAGE_UNITS: u32 = 60;
 const HISTORY_UNITS: u32 = 2;
+const MODIFY_UNITS: u32 = 10;
+const TRASH_UNITS: u32 = 20;
+const UNTRASH_UNITS: u32 = 10;
 
 pub struct GmailClient {
     http: ureq::Agent,
@@ -73,17 +79,60 @@ impl GmailClient {
         units: u32,
     ) -> anyhow::Result<Option<T>> {
         let url = format!("{API}/{path}");
+        let reply = self.send(path, units, |authorization| {
+            self.http
+                .get(&url)
+                .header("Authorization", authorization)
+                .query_pairs(query.iter().copied())
+                .call()
+        })?;
+        match reply {
+            Reply::Done(value) => Ok(Some(value)),
+            Reply::NotFound => Ok(None),
+            Reply::Rejected(message) => bail!("Gmail rejected {path}: {message}"),
+        }
+    }
+
+    /// POSTs a thread change. Gmail answers with the thread, which Mail does
+    /// not need: the next sync reads the result from history.
+    fn post_thread(
+        &self,
+        thread_id: &str,
+        action: &str,
+        body: Option<serde_json::Value>,
+        units: u32,
+    ) -> anyhow::Result<Outcome> {
+        let path = format!("threads/{thread_id}/{action}");
+        let url = format!("{API}/{path}");
+        let reply = self.send::<IgnoredAny>(&path, units, |authorization| {
+            let request = self.http.post(&url).header("Authorization", authorization);
+            match &body {
+                Some(body) => request.send_json(body),
+                None => request.send_empty(),
+            }
+        })?;
+        Ok(match reply {
+            Reply::Done(_) => Outcome::Done,
+            Reply::NotFound => Outcome::Gone,
+            Reply::Rejected(message) => Outcome::Rejected(message),
+        })
+    }
+
+    /// Sends one request with pacing, token refresh and retries. `request`
+    /// receives the Authorization header value.
+    fn send<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        units: u32,
+        request: impl Fn(&str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> anyhow::Result<Reply<T>> {
         let mut refreshed = false;
         let mut attempt = 0;
         loop {
             attempt += 1;
             self.pacer.wait(units);
-            let request = self
-                .http
-                .get(&url)
-                .header("Authorization", &format!("Bearer {}", self.access_token()?))
-                .query_pairs(query.iter().copied());
-            let mut response = match request.call() {
+            let authorization = format!("Bearer {}", self.access_token()?);
+            let mut response = match request(&authorization) {
                 Ok(response) => response,
                 Err(error) if attempt < MAX_ATTEMPTS && is_transient(&error) => {
                     thread::sleep(back_off(attempt));
@@ -100,10 +149,10 @@ impl GmailClient {
                     .limit(64 * 1024 * 1024)
                     .read_json()
                     .with_context(|| format!("Unexpected response from Gmail for {path}"))?;
-                return Ok(Some(value));
+                return Ok(Reply::Done(value));
             }
             if status == 404 {
-                return Ok(None);
+                return Ok(Reply::NotFound);
             }
             let body = response.body_mut().read_to_string().unwrap_or_default();
             if status == 401 && !refreshed {
@@ -116,12 +165,22 @@ impl GmailClient {
                 self.pacer.hold(back_off(attempt));
                 continue;
             }
+            if status == 400 {
+                return Ok(Reply::Rejected(error_message(&body)));
+            }
             bail!(
                 "Gmail returned {status} for {path}: {}",
                 error_message(&body)
             );
         }
     }
+}
+
+enum Reply<T> {
+    Done(T),
+    NotFound,
+    /// 400: the request can never succeed as sent.
+    Rejected(String),
 }
 
 impl GmailApi for GmailClient {
@@ -172,6 +231,24 @@ impl GmailApi for GmailClient {
             params.push(("pageToken", token));
         }
         self.get("history", &params, HISTORY_UNITS)
+    }
+
+    fn modify_thread(
+        &self,
+        thread_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> anyhow::Result<Outcome> {
+        let body = serde_json::json!({"addLabelIds": add, "removeLabelIds": remove});
+        self.post_thread(thread_id, "modify", Some(body), MODIFY_UNITS)
+    }
+
+    fn trash_thread(&self, thread_id: &str) -> anyhow::Result<Outcome> {
+        self.post_thread(thread_id, "trash", None, TRASH_UNITS)
+    }
+
+    fn untrash_thread(&self, thread_id: &str) -> anyhow::Result<Outcome> {
+        self.post_thread(thread_id, "untrash", None, UNTRASH_UNITS)
     }
 }
 

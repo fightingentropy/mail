@@ -99,6 +99,20 @@ const MIGRATIONS: &[&str] = &[
         VALUES (new.id, new.subject, new.from_name, new.from_addr, new.to_addrs, new.cc_addrs, new.body_text);
     END;
     "#,
+    // 2. Triage done in Mail and not yet sent to Gmail, oldest first.
+    r#"
+    CREATE TABLE pending_changes (
+        id INTEGER PRIMARY KEY,
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL,
+        -- 'labels', 'trash' or 'untrash'.
+        kind TEXT NOT NULL CHECK (kind IN ('labels', 'trash', 'untrash')),
+        -- Space-separated label IDs, for 'labels'.
+        add_labels TEXT NOT NULL DEFAULT '',
+        remove_labels TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub(super) const LATEST: i64 = MIGRATIONS.len() as i64;

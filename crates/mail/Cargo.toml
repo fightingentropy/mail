@@ -21,6 +21,11 @@ clap = { version = "4.5", features = ["derive"] }
 schemars = "1"
 # Formats message dates in the local time zone.
 jiff = "0.2"
+# The window. OpenGL only; persistence remembers the window's size and place.
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "persistence"] }
+egui = "0.36"
+# Saves demo screenshots for the README and visual checks.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 tempfile = "3"

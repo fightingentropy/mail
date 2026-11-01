@@ -30,6 +30,27 @@ pub trait GmailApi: Sync {
         start_history_id: &str,
         page_token: Option<&str>,
     ) -> anyhow::Result<Option<HistoryPage>>;
+    /// Adds and removes labels on every message in a thread: archive, read,
+    /// star, label.
+    fn modify_thread(
+        &self,
+        thread_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> anyhow::Result<Outcome>;
+    fn trash_thread(&self, thread_id: &str) -> anyhow::Result<Outcome>;
+    fn untrash_thread(&self, thread_id: &str) -> anyhow::Result<Outcome>;
+}
+
+/// How Gmail answered a change. Transient failures are errors instead, so
+/// the change stays queued.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Done,
+    /// The thread no longer exists; nothing to do.
+    Gone,
+    /// Gmail refused the change for good, for example a label that was deleted.
+    Rejected(String),
 }
 
 #[derive(Clone, Debug, Deserialize)]

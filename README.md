@@ -7,8 +7,10 @@ work offline and take milliseconds; the network is only used to sync. The same
 binary has a command line and a one-shot JSON CLI that coding agents such as
 Claude Code and Codex can use to search your mail. Agents can't send anything.
 
-> **Status: week one.** Sign-in, sync and offline search work from the
-> command line. The keyboard-driven window is next. See the
+![Mail's window on the demo mailbox: sidebar, conversation list and reader](docs/window.png)
+
+> **Status: milestone 2.** Sync, offline search and the keyboard-driven
+> window work. Replies and drafts are next. See the
 > [milestones](docs/design.md#milestones).
 
 ## Why
@@ -43,6 +45,32 @@ mail status
 
 Later runs of `mail sync` only fetch what changed.
 
+## The window
+
+Run `mail` with no command. Everything on screen comes from the local
+database, so the window opens and responds instantly; it syncs in the
+background while open (at launch, every two minutes, and right after you
+triage) and nothing runs once you quit.
+
+| Key | Does |
+|---|---|
+| `j` `k` | Next and previous conversation |
+| `e` | Archive |
+| `#` or Delete | Move to Trash |
+| `u` / `s` | Mark read or unread / star |
+| `l` | Add or remove a label |
+| `z` | Undo |
+| `/` | Search, live as you type |
+| `g` then `i` `s` `t` `d` `a` | Inbox, Starred, Sent, Drafts, All mail |
+| `?` | All shortcuts |
+
+Triage applies locally at once and waits in a queue until the next sync sends
+it to Gmail, so it works offline too. Try it without a Google account:
+
+```bash
+mail --demo
+```
+
 ## For agents
 
 ```bash
@@ -74,6 +102,9 @@ mail (CLI, agent CLI, window)  →  mail-core: auth · gmail · sync · store
   metadata are stored; attachments download only when opened.
 - **Search.** An FTS5 index over subject, sender, recipients and body,
   ranked with bm25. Words match as you type.
+- **Window.** egui/eframe with an embedded Inter font. The drawing code reads
+  a model that has no egui in it, so tests drive the window like a person at
+  the keyboard.
 
 The [design doc](docs/design.md) explains the decisions, including why
 OAuth beats an IMAP app password here.
@@ -88,7 +119,12 @@ cargo fmt --all
 
 `mail-core` holds the engine and has no UI code. Its sync logic is tested
 against an in-memory fake of the Gmail API, so tests never touch a real
-mailbox. Test data uses `example.com` addresses only.
+mailbox. Test data and the demo mailbox are made up.
+
+`mail --demo --screenshot out.png` renders the window to a PNG and quits;
+add `--demo-keys "j e / text:seat"` to press keys first. That is how the
+screenshot above is made and how the window's keyboard handling gets checked
+without a person at the keyboard.
 
 ## Privacy
 
@@ -107,11 +143,14 @@ client, which extends Carmine Paolino's MIT-licensed
 
 Built on [SQLite](https://sqlite.org) via
 [rusqlite](https://github.com/rusqlite/rusqlite),
+[egui and eframe](https://github.com/emilk/egui),
 [ureq](https://github.com/algesten/ureq),
 [serde](https://serde.rs), [clap](https://github.com/clap-rs/clap),
 [jiff](https://github.com/BurntSushi/jiff),
 [encoding_rs](https://github.com/hsivonen/encoding_rs) and
 [security-framework](https://github.com/kornelski/rust-security-framework).
+The window uses the [Inter](https://rsms.me/inter/) typeface under the SIL
+Open Font License ([license](crates/mail/assets/fonts/Inter-LICENSE.txt)).
 
 Mail is not affiliated with Google. Gmail is a trademark of Google LLC.
 

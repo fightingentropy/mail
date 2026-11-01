@@ -141,7 +141,7 @@ pub struct SearchArgs {
 }
 
 pub fn search(paths: &Paths, args: &SearchArgs) -> anyhow::Result<()> {
-    let store = Store::open_read_only(&paths.database())?;
+    let store = Store::open_existing(&paths.database())?;
     let account = signed_in(&store)?;
     let query = SearchQuery {
         text: args.words.join(" "),
@@ -194,7 +194,7 @@ pub fn search(paths: &Paths, args: &SearchArgs) -> anyhow::Result<()> {
 }
 
 pub fn thread(paths: &Paths, thread_id: &str) -> anyhow::Result<()> {
-    let store = Store::open_read_only(&paths.database())?;
+    let store = Store::open_existing(&paths.database())?;
     let account = signed_in(&store)?;
     let messages = store.thread(account.id, thread_id)?;
     anyhow::ensure!(
@@ -237,7 +237,7 @@ pub fn thread(paths: &Paths, thread_id: &str) -> anyhow::Result<()> {
 }
 
 pub fn labels(paths: &Paths) -> anyhow::Result<()> {
-    let store = Store::open_read_only(&paths.database())?;
+    let store = Store::open_existing(&paths.database())?;
     let account = signed_in(&store)?;
     for label in store.labels(account.id)? {
         if label.name == label.id {
@@ -251,7 +251,7 @@ pub fn labels(paths: &Paths) -> anyhow::Result<()> {
 
 pub fn status(paths: &Paths) -> anyhow::Result<()> {
     let database = paths.database();
-    let store = Store::open_read_only(&database)?;
+    let store = Store::open_existing(&database)?;
     let account = signed_in(&store)?;
     let stats = store.stats(account.id)?;
 

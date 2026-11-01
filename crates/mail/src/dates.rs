@@ -14,6 +14,20 @@ pub fn human(millis: i64) -> String {
     local(millis).strftime("%a %-d %b %Y %H:%M").to_string()
 }
 
+/// `14:02` today, `31 Oct` earlier this year, `31 Oct 2025` before that.
+pub fn short(millis: i64) -> String {
+    let then = local(millis);
+    let now = Zoned::now();
+    let format = if then.date() == now.date() {
+        "%H:%M"
+    } else if then.year() == now.year() {
+        "%-d %b"
+    } else {
+        "%-d %b %Y"
+    };
+    then.strftime(format).to_string()
+}
+
 /// `31 Oct 2026`, for date ranges.
 pub fn day(millis: i64) -> String {
     local(millis).strftime("%-d %b %Y").to_string()

@@ -5,6 +5,9 @@
 //! handful of requests when little has changed. If that history has expired,
 //! sync falls back to a full pass.
 //!
+//! Before pulling, sync pushes triage made in Mail (archive, labels, trash),
+//! so Gmail's answer already includes it.
+//!
 //! The sync point is saved only after every change is stored, so an
 //! interrupted sync simply repeats some work next time.
 
@@ -18,8 +21,8 @@ use std::{
 use anyhow::Context;
 
 use crate::{
-    gmail::{GmailApi, parse_message},
-    model::{Account, Label, LabelKind, Message},
+    gmail::{GmailApi, Outcome, parse_message},
+    model::{Account, Change, Label, LabelKind, Message},
     store::Store,
 };
 
@@ -54,6 +57,10 @@ pub struct SyncReport {
     pub downloaded: usize,
     pub relabeled: usize,
     pub deleted: usize,
+    /// Local changes Gmail accepted.
+    pub pushed: usize,
+    /// Local changes Gmail refused for good and that were dropped.
+    pub rejected: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,12 +86,48 @@ pub fn sync(
     options: &SyncOptions,
     progress: &mut dyn FnMut(Progress),
 ) -> anyhow::Result<SyncReport> {
-    if let Some(history_id) = &account.history_id
-        && let Some(report) = incremental(store, api, account, history_id, options, progress)?
-    {
-        return Ok(report);
+    let (pushed, rejected) = push_changes(store, api, account)?;
+    let replayed = match &account.history_id {
+        Some(history_id) => incremental(store, api, account, history_id, options, progress)?,
+        None => None,
+    };
+    let mut report = match replayed {
+        Some(report) => report,
+        None => full(store, api, account, options, progress)?,
+    };
+    // Changes made in the window while this sync ran are not in Gmail's
+    // view yet; keep showing them.
+    store.reapply_pending(account.id)?;
+    report.pushed = pushed;
+    report.rejected = rejected;
+    Ok(report)
+}
+
+/// Sends queued triage to Gmail, oldest first. A network or quota failure
+/// stops here and leaves the rest queued; a change Gmail refuses for good is
+/// dropped. Returns how many were accepted and how many refused.
+pub fn push_changes(
+    store: &mut Store,
+    api: &dyn GmailApi,
+    account: &Account,
+) -> anyhow::Result<(usize, usize)> {
+    let mut accepted = 0;
+    let mut rejected = 0;
+    for pending in store.pending_changes(account.id)? {
+        let thread_id = pending.thread_id.as_str();
+        let outcome = match &pending.change {
+            Change::Labels { add, remove } => api.modify_thread(thread_id, add, remove),
+            Change::Trash => api.trash_thread(thread_id),
+            Change::Untrash => api.untrash_thread(thread_id),
+        }
+        .with_context(|| format!("Could not send a change for thread {thread_id}"))?;
+        match outcome {
+            Outcome::Done | Outcome::Gone => accepted += 1,
+            Outcome::Rejected(_) => rejected += 1,
+        }
+        store.finish_change(pending.id)?;
     }
-    full(store, api, account, options, progress)
+    Ok((accepted, rejected))
 }
 
 fn full(
@@ -146,6 +189,8 @@ fn full(
         downloaded,
         relabeled: 0,
         deleted,
+        pushed: 0,
+        rejected: 0,
     })
 }
 
@@ -214,6 +259,8 @@ fn incremental(
         downloaded,
         relabeled,
         deleted,
+        pushed: 0,
+        rejected: 0,
     }))
 }
 

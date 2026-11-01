@@ -27,7 +27,7 @@ calendar or contacts, a hosted service of any kind.
 ┌──────────────────────────── mail (one binary) ────────────────────────────┐
 │ command line   auth · sync · search · thread · labels · status            │
 │ agent CLI      mail agent tools | call <tool> '<json>'   (read-only)      │
-│ window         egui/eframe, keyboard triage                (milestone 2)  │
+│ window         egui/eframe, keyboard triage, background sync              │
 └──────────────────────────────────┬────────────────────────────────────────┘
                                    │
 ┌──────────────────────────────── mail-core ────────────────────────────────┐
@@ -119,6 +119,7 @@ are numbered and tracked with `PRAGMA user_version`
 | `message_labels` | Message ↔ label ID. Gmail labels are per message; a thread shows the union |
 | `attachments` | Filename, type, size, Gmail attachment ID. Contents are fetched only when opened |
 | `message_search` | FTS5 index over subject, sender name and address, To, Cc and body |
+| `pending_changes` | Triage made in Mail and not yet accepted by Gmail, oldest first |
 
 Choices:
 
@@ -158,8 +159,11 @@ Choices:
   second, about 1.6 full messages a second, so Gmail rarely refuses one. On
   429, 5xx or a quota 403, all workers pause together, backing off from 2
   seconds up to a minute.
-- **No background process.** Sync runs when you run `mail sync`, and (from
-  milestone 2) while the window is open. Nothing runs when Mail is closed.
+- **Local changes first.** Each sync sends queued triage before it pulls,
+  and re-applies whatever was queued while it ran.
+- **No background process.** Sync runs when you run `mail sync`, and while
+  the window is open (at launch, every two minutes, after triage, `⌘R`).
+  Nothing runs when Mail is closed.
 
 ## Search
 
@@ -172,6 +176,8 @@ or sorted newest first. Trash and spam are hidden unless named as the label.
 ## Command line
 
 ```
+mail                                        open the window
+mail --demo                                 the window on a made-up mailbox
 mail auth [--client <file>]                 sign in (browser)
 mail sync [--days 90]                       full first time, then incremental
 mail search <words…> [--from] [--label] [--since] [--before] [--newest] [--limit]
@@ -208,15 +214,20 @@ Rules:
 
 ## Milestones
 
-1. **Week one: sync and search from the command line.** OAuth sign-in,
-   full and incremental sync, FTS5 search, `mail search`/`thread`/`status`,
-   read-only agent CLI. *Built and tested against a fake Gmail; the first live
-   run needs the Google Cloud client (below).*
-2. **The window.** egui/eframe, charcoal dark theme, big readable type. Inbox
-   and label lists, thread view, `/` to search. Keyboard triage: `j`/`k`,
-   `Enter`, `e` archive, `#` trash, `l` label, `u` unread. Changes apply
-   locally at once and queue in a `pending_changes` table that is replayed to
-   Gmail (`messages.batchModify`, `trash`), so triage works offline.
+1. **Week one: sync and search from the command line.** *Done.* OAuth
+   sign-in, full and incremental sync, FTS5 search, `mail search`, `thread`,
+   `status`, read-only agent CLI. On a real mailbox: 452 messages in 285 s
+   (quota-bound), incremental sync in 0.2 s, search under 2 ms.
+2. **The window.** *Done.* egui/eframe, charcoal dark theme, Inter at large
+   sizes. Sidebar with mailboxes, labels and unread counts; conversation list;
+   reader with older messages collapsed; live search. Keyboard triage: `j`/`k`,
+   `e` archive, `#` trash, `u` unread, `s` star, `l` label picker, `z` undo,
+   `g` sequences. A thread counts as read after 1.5 s on screen. Changes apply
+   locally at once and queue in `pending_changes`; sync sends them first
+   (`threads.modify`, `threads.trash`, `threads.untrash`), then pulls, then
+   re-applies anything queued meanwhile, so archiving during a sync doesn't
+   flicker. Gmail refusals (a deleted label) are dropped and reported. Not yet:
+   links in bodies, HTML view, attachments, light theme.
 3. **Writing.** Reply and compose as Gmail drafts (RFC 5322 built locally,
    threaded with `In-Reply-To`/`References`), and the agent `create_draft`
    tool. Whether the window may send, after an explicit confirmation, gets

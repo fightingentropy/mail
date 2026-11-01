@@ -1,5 +1,76 @@
 //! Mail as Mail stores it, independent of the Gmail wire format.
 
+/// A conversation as the thread list shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThreadSummary {
+    pub thread_id: String,
+    /// Unix milliseconds of the newest message.
+    pub last_date: i64,
+    /// The first message's subject.
+    pub subject: String,
+    /// Distinct senders, oldest first; your own address shows as "me".
+    pub senders: Vec<String>,
+    /// The newest message's snippet.
+    pub snippet: String,
+    pub message_count: usize,
+    pub unread: bool,
+    pub starred: bool,
+    /// Every label on any message in the thread.
+    pub label_ids: Vec<String>,
+}
+
+/// One triage action on a whole thread. Mail applies it locally at once and
+/// sends it to Gmail on the next sync.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    Labels {
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
+    Trash,
+    Untrash,
+}
+
+impl Change {
+    pub fn archive() -> Self {
+        Self::remove("INBOX")
+    }
+
+    pub fn add(label_id: &str) -> Self {
+        Self::Labels {
+            add: vec![label_id.to_owned()],
+            remove: Vec::new(),
+        }
+    }
+
+    pub fn remove(label_id: &str) -> Self {
+        Self::Labels {
+            add: Vec::new(),
+            remove: vec![label_id.to_owned()],
+        }
+    }
+
+    /// The change that undoes this one.
+    pub fn inverse(&self) -> Self {
+        match self {
+            Change::Labels { add, remove } => Change::Labels {
+                add: remove.clone(),
+                remove: add.clone(),
+            },
+            Change::Trash => Change::Untrash,
+            Change::Untrash => Change::Trash,
+        }
+    }
+}
+
+/// A change waiting to be sent to Gmail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingChange {
+    pub id: i64,
+    pub thread_id: String,
+    pub change: Change,
+}
+
 /// One Gmail account. Version 1 supports a single account per database.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Account {

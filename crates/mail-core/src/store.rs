@@ -3,8 +3,10 @@
 //! Gmail stays the source of truth. Everything here can be rebuilt by a full
 //! sync, which is what makes offline reading and instant search safe.
 
+mod changes;
 mod schema;
 mod search;
+mod threads;
 
 use std::{collections::HashSet, fs, path::Path, time::Duration};
 
@@ -13,6 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 use crate::model::{Account, Attachment, Label, LabelKind, Message};
 pub use search::{Order, SearchHit, SearchQuery};
+pub use threads::ThreadFilter;
 
 pub struct Store {
     connection: Connection,
@@ -45,8 +48,19 @@ impl Store {
         Ok(Self { connection })
     }
 
-    /// Opens an existing database without the ability to change it. The agent
-    /// CLI uses this, so no agent command can alter local mail.
+    /// Opens a database that must already exist, migrating it if needed. The
+    /// reading commands use this, so they never create an empty database.
+    pub fn open_existing(path: &Path) -> anyhow::Result<Self> {
+        ensure!(
+            path.exists(),
+            "No mail downloaded yet. Run `mail auth`, then `mail sync`."
+        );
+        Self::open(path)
+    }
+
+    /// Opens an existing database without the ability to change it, not even
+    /// to migrate it. The agent CLI uses this, so no agent command can alter
+    /// local mail.
     pub fn open_read_only(path: &Path) -> anyhow::Result<Self> {
         ensure!(
             path.exists(),
@@ -58,9 +72,14 @@ impl Store {
         )?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "query_only", true)?;
+        let version = schema::version(&connection)?;
         ensure!(
-            schema::version(&connection)? == schema::LATEST,
-            "The mail database needs an update. Run `mail sync` once."
+            version <= schema::LATEST,
+            "This mail database was updated by a newer version of Mail. Update Mail."
+        );
+        ensure!(
+            version == schema::LATEST,
+            "The mail database needs an update. Run `mail status` or open Mail once."
         );
         Ok(Self { connection })
     }

@@ -1,16 +1,16 @@
 //! `mail`: a fast, local-first Gmail client for Apple Silicon Macs.
 //!
-//! Today this is the command line: sign in, sync and search offline. The
-//! desktop window arrives in milestone 2 and will open when `mail` runs with
-//! no command.
+//! `mail` with no command opens the window. The commands sign in, sync and
+//! search from the terminal, and `mail agent` serves coding agents.
 
 mod agent;
 mod commands;
 mod dates;
+mod window;
 
 use std::{path::PathBuf, process::ExitCode};
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use mail_core::paths::Paths;
 
 #[derive(Parser)]
@@ -24,6 +24,15 @@ struct Cli {
     /// ~/Library/Application Support/org.erlin.mail.
     #[arg(long, global = true, value_name = "PATH")]
     data_dir: Option<PathBuf>,
+    /// Open the window on a made-up mailbox, without a Google account.
+    #[arg(long)]
+    demo: bool,
+    /// Save a PNG of the window to this path once it has rendered, then quit.
+    #[arg(long, value_name = "FILE", hide = true)]
+    screenshot: Option<PathBuf>,
+    /// Keys to press in the demo before a screenshot, e.g. "j e / text:seat".
+    #[arg(long, value_name = "KEYS", hide = true, requires = "demo")]
+    demo_keys: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -71,13 +80,14 @@ fn main() -> ExitCode {
     };
 
     let result = match cli.command {
-        None => {
-            let _ = Cli::command().print_help();
-            println!(
-                "\nThe Mail window arrives in milestone 2. Until then, use the commands above."
-            );
-            Ok(())
-        }
+        None => window::run(
+            &paths,
+            window::Options {
+                demo: cli.demo,
+                screenshot: cli.screenshot,
+                demo_keys: cli.demo_keys,
+            },
+        ),
         Some(Command::Auth { client }) => commands::auth(&paths, client.as_deref()),
         Some(Command::Sync { days }) => commands::sync(&paths, days),
         Some(Command::Search(args)) => commands::search(&paths, &args),

@@ -34,3 +34,9 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --locked --workspace
+      - name: Window smoke test
+        timeout-minutes: 3
+        run: |
+          cargo build --locked
+          target/aarch64-apple-darwin/debug/mail --demo --demo-keys "j e / text:seat" --screenshot "$RUNNER_TEMP/window.png"
+          test -s "$RUNNER_TEMP/window.png"

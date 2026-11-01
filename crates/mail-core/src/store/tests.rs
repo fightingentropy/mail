@@ -1,4 +1,5 @@
 use super::{search::fts_expression, *};
+use crate::model::Change;
 
 fn message(
     id: &str,
@@ -338,4 +339,139 @@ fn like_wildcards_in_sender_filter_are_literal() {
         ..query("")
     };
     assert!(store.search(account, &percent).unwrap().is_empty());
+}
+
+fn me(store: &Store) -> Account {
+    store.account().unwrap().unwrap()
+}
+
+#[test]
+fn summarizes_threads_newest_first() {
+    let (store, _) = store_with_mail();
+    let threads = store
+        .threads(&me(&store), &ThreadFilter::Label("INBOX".into()))
+        .unwrap();
+    assert_eq!(
+        threads
+            .iter()
+            .map(|t| t.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        ["t2", "t1"]
+    );
+
+    let invoice = &threads[1];
+    assert_eq!(invoice.subject, "Invoice for October");
+    assert_eq!(invoice.senders, ["Ana Lima", "me"]);
+    assert_eq!(invoice.snippet, "Thanks, paid today.");
+    assert_eq!(invoice.message_count, 2);
+    assert_eq!(invoice.last_date, 2_000);
+    assert!(invoice.unread);
+    assert!(!invoice.starred);
+    assert_eq!(invoice.label_ids, ["INBOX", "SENT", "UNREAD"]);
+}
+
+#[test]
+fn all_mail_and_label_views_hide_trash_and_spam() {
+    let (mut store, account) = store_with_mail();
+    let all = |store: &Store| {
+        store
+            .threads(&me(store), &ThreadFilter::AllMail)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.thread_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(all(&store), ["t2", "t1"]);
+
+    store.apply_change(account, "t2", &Change::Trash).unwrap();
+    assert_eq!(all(&store), ["t1"]);
+    assert!(
+        store
+            .threads(&me(&store), &ThreadFilter::Label("Label_1".into()))
+            .unwrap()
+            .is_empty()
+    );
+    let trash = store
+        .threads(&me(&store), &ThreadFilter::Label("TRASH".into()))
+        .unwrap();
+    assert_eq!(trash[0].thread_id, "t2");
+}
+
+#[test]
+fn search_groups_matches_by_thread() {
+    let (store, _) = store_with_mail();
+    let threads = store
+        .search_threads(&me(&store), &query("invoice"))
+        .unwrap();
+    // m1 and m2 share t1; spam (t3) stays hidden.
+    assert_eq!(
+        threads
+            .iter()
+            .map(|t| t.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        ["t1", "t2"]
+    );
+    assert_eq!(threads[0].message_count, 2);
+}
+
+#[test]
+fn counts_unread_threads_per_label() {
+    let (store, account) = store_with_mail();
+    let counts = store.unread_counts(account).unwrap();
+    assert_eq!(counts.get("INBOX"), Some(&1));
+    assert_eq!(counts.get("Label_1"), None);
+}
+
+#[test]
+fn triage_applies_to_every_message_in_the_thread_and_queues() {
+    let (mut store, account) = store_with_mail();
+    store
+        .apply_change(account, "t1", &Change::add("STARRED"))
+        .unwrap();
+    store
+        .apply_change(account, "t1", &Change::archive())
+        .unwrap();
+
+    for message in store.thread(account, "t1").unwrap() {
+        assert!(message.has_label("STARRED"));
+        assert!(!message.has_label("INBOX"));
+    }
+    let pending = store.pending_changes(account).unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[1].change, Change::archive());
+
+    store.finish_change(pending[0].id).unwrap();
+    assert_eq!(store.pending_changes(account).unwrap().len(), 1);
+}
+
+#[test]
+fn trash_and_untrash_round_trip() {
+    let (mut store, account) = store_with_mail();
+    store.apply_change(account, "t2", &Change::Trash).unwrap();
+    let labels = store.message(account, "m3").unwrap().unwrap().label_ids;
+    assert_eq!(labels, ["Label_1", "TRASH"]);
+    store.apply_change(account, "t2", &Change::Untrash).unwrap();
+    store
+        .apply_change(account, "t2", &Change::add("INBOX"))
+        .unwrap();
+    let labels = store.message(account, "m3").unwrap().unwrap().label_ids;
+    assert_eq!(labels, ["INBOX", "Label_1"]);
+}
+
+#[test]
+fn queued_changes_win_over_an_older_sync() {
+    let (mut store, account) = store_with_mail();
+    store
+        .apply_change(account, "t1", &Change::archive())
+        .unwrap();
+    // Sync writes Gmail's labels, which predate the archive.
+    let inbox = vec!["INBOX".to_string(), "UNREAD".to_string()];
+    store
+        .set_labels(account, [("m1", inbox.as_slice())])
+        .unwrap();
+    store.reapply_pending(account).unwrap();
+    assert_eq!(
+        store.message(account, "m1").unwrap().unwrap().label_ids,
+        ["UNREAD"]
+    );
 }

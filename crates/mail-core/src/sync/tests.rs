@@ -7,7 +7,8 @@ use serde_json::json;
 
 use super::*;
 use crate::gmail::{
-    ApiLabel, ApiMessage, HistoryMessage, HistoryPage, HistoryRecord, IdPage, MessageRef, Profile,
+    ApiLabel, ApiMessage, HistoryMessage, HistoryPage, HistoryRecord, IdPage, MessageRef, Outcome,
+    Profile,
 };
 use crate::store::SearchQuery;
 
@@ -25,6 +26,10 @@ struct State {
     fetches: usize,
     /// A message whose download fails, like a quota error that outlasts retries.
     failing: Option<String>,
+    /// Every call that changes the mailbox, in order, plus "history" reads.
+    calls: Vec<String>,
+    /// When set, thread changes fail as if the network were down.
+    offline: bool,
 }
 
 impl FakeGmail {
@@ -36,6 +41,8 @@ impl FakeGmail {
                 history: Some(Vec::new()),
                 fetches: 0,
                 failing: None,
+                calls: Vec::new(),
+                offline: false,
             }),
         }
     }
@@ -77,6 +84,49 @@ impl FakeGmail {
 
     fn fail_on(&self, id: Option<&str>) {
         self.state.lock().unwrap().failing = id.map(str::to_owned);
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.state.lock().unwrap().calls.clone()
+    }
+
+    fn set_offline(&self, offline: bool) {
+        self.state.lock().unwrap().offline = offline;
+    }
+
+    fn labels_of(&self, id: &str) -> Vec<String> {
+        self.state.lock().unwrap().messages[id].label_ids.clone()
+    }
+
+    /// Applies a thread change the way Gmail would, recording it in history.
+    fn change_thread(
+        &self,
+        call: String,
+        thread_id: &str,
+        edit: impl Fn(&mut Vec<String>),
+    ) -> anyhow::Result<Outcome> {
+        let mut state = self.state.lock().unwrap();
+        if state.offline {
+            anyhow::bail!("network unreachable");
+        }
+        state.calls.push(call);
+        let ids: Vec<String> = state
+            .messages
+            .values()
+            .filter(|m| m.thread_id == thread_id)
+            .map(|m| m.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Ok(Outcome::Gone);
+        }
+        for id in ids {
+            state.history_id += 1;
+            let message = state.messages.get_mut(&id).unwrap();
+            edit(&mut message.label_ids);
+            let changed = entry(message);
+            record(&mut state, |record| record.labels_added.push(changed));
+        }
+        Ok(Outcome::Done)
     }
 }
 
@@ -156,12 +206,49 @@ impl GmailApi for FakeGmail {
         _start: &str,
         _page_token: Option<&str>,
     ) -> anyhow::Result<Option<HistoryPage>> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.calls.push("history".into());
         Ok(state.history.clone().map(|history| HistoryPage {
             history,
             next_page_token: None,
             history_id: state.history_id.to_string(),
         }))
+    }
+
+    fn modify_thread(
+        &self,
+        thread_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> anyhow::Result<Outcome> {
+        if add.iter().any(|label| label == "Label_deleted") {
+            return Ok(Outcome::Rejected("Invalid label".into()));
+        }
+        self.change_thread(
+            format!("modify {thread_id} +{add:?} -{remove:?}"),
+            thread_id,
+            |labels| {
+                labels.retain(|label| !remove.contains(label));
+                for label in add {
+                    if !labels.contains(label) {
+                        labels.push(label.clone());
+                    }
+                }
+            },
+        )
+    }
+
+    fn trash_thread(&self, thread_id: &str) -> anyhow::Result<Outcome> {
+        self.change_thread(format!("trash {thread_id}"), thread_id, |labels| {
+            labels.retain(|label| label != "INBOX");
+            labels.push("TRASH".into());
+        })
+    }
+
+    fn untrash_thread(&self, thread_id: &str) -> anyhow::Result<Outcome> {
+        self.change_thread(format!("untrash {thread_id}"), thread_id, |labels| {
+            labels.retain(|label| label != "TRASH");
+        })
     }
 }
 
@@ -251,7 +338,9 @@ fn first_sync_downloads_the_window_and_records_where_it_stopped() {
             kind: SyncKind::Full,
             downloaded: 5,
             relabeled: 0,
-            deleted: 0
+            deleted: 0,
+            pushed: 0,
+            rejected: 0,
         }
     );
     let account = store.account().unwrap().unwrap();
@@ -288,7 +377,9 @@ fn later_syncs_replay_history() {
             kind: SyncKind::Incremental,
             downloaded: 1,
             relabeled: 1,
-            deleted: 1
+            deleted: 1,
+            pushed: 0,
+            rejected: 0,
         }
     );
     assert_eq!(
@@ -393,4 +484,111 @@ fn reports_progress() {
         seen.last(),
         Some(&Progress::Downloading { done: 5, total: 5 })
     );
+}
+
+#[test]
+fn local_triage_is_pushed_before_pulling() {
+    let gmail = mailbox();
+    let mut store = Store::in_memory();
+    run(&mut store, &gmail);
+    let account = store.account().unwrap().unwrap();
+
+    store
+        .apply_change(account.id, "thread-a", &Change::archive())
+        .unwrap();
+    store
+        .apply_change(account.id, "thread-b", &Change::Trash)
+        .unwrap();
+    assert!(
+        !labels(&store, "a").contains(&"INBOX".to_string()),
+        "applied locally at once"
+    );
+
+    let report = run(&mut store, &gmail);
+    assert_eq!((report.pushed, report.rejected), (2, 0));
+    let calls = gmail.calls();
+    let history_at = calls.iter().position(|call| call == "history").unwrap();
+    assert!(
+        calls[..history_at]
+            .iter()
+            .any(|call| call.starts_with("modify thread-a"))
+    );
+    assert!(
+        calls[..history_at]
+            .iter()
+            .any(|call| call == "trash thread-b")
+    );
+    assert_eq!(gmail.labels_of("a"), ["UNREAD"]);
+    assert!(store.pending_changes(account.id).unwrap().is_empty());
+    // Gmail's view, read back from history, matches what Mail showed.
+    assert_eq!(labels(&store, "a"), ["UNREAD"]);
+    assert!(labels(&store, "b").contains(&"TRASH".to_string()));
+}
+
+#[test]
+fn offline_changes_stay_queued_and_sync_does_not_pull() {
+    let gmail = mailbox();
+    let mut store = Store::in_memory();
+    run(&mut store, &gmail);
+    let account = store.account().unwrap().unwrap();
+    store
+        .apply_change(account.id, "thread-a", &Change::archive())
+        .unwrap();
+
+    gmail.set_offline(true);
+    let options = SyncOptions::default();
+    assert!(sync(&mut store, &gmail, &account, &options, &mut |_| {}).is_err());
+    assert_eq!(store.pending_changes(account.id).unwrap().len(), 1);
+    assert!(!gmail.calls().contains(&"history".to_string()));
+
+    gmail.set_offline(false);
+    assert_eq!(run(&mut store, &gmail).pushed, 1);
+    assert!(store.pending_changes(account.id).unwrap().is_empty());
+}
+
+#[test]
+fn refused_changes_are_dropped_so_the_queue_moves_on() {
+    let gmail = mailbox();
+    let mut store = Store::in_memory();
+    run(&mut store, &gmail);
+    let account = store.account().unwrap().unwrap();
+    store
+        .apply_change(account.id, "thread-a", &Change::add("Label_deleted"))
+        .unwrap();
+    store
+        .apply_change(account.id, "thread-c", &Change::add("STARRED"))
+        .unwrap();
+
+    let report = run(&mut store, &gmail);
+    assert_eq!((report.pushed, report.rejected), (1, 1));
+    assert!(gmail.labels_of("c").contains(&"STARRED".to_string()));
+}
+
+#[test]
+fn changes_made_during_a_sync_survive_it() {
+    let gmail = mailbox();
+    let mut store = Store::in_memory();
+    run(&mut store, &gmail);
+    let account = store.account().unwrap().unwrap();
+
+    // Gmail relabels "a"; meanwhile the window archives it before pushing.
+    gmail.relabel("a", &["INBOX", "UNREAD", "STARRED"]);
+    store
+        .apply_change(account.id, "thread-a", &Change::archive())
+        .unwrap();
+    gmail.set_offline(true);
+    // Simulate the pull half alone: it writes Gmail's labels, then reapplies.
+    let replayed = incremental(
+        &mut store,
+        &gmail,
+        &account,
+        "100",
+        &SyncOptions::default(),
+        &mut |_| {},
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(replayed.relabeled, 1);
+    store.reapply_pending(account.id).unwrap();
+    assert_eq!(labels(&store, "a"), ["STARRED", "UNREAD"]);
 }
