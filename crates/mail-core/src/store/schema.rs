@@ -134,6 +134,14 @@ pub(super) const MIGRATIONS: &[&str] = &[
     CREATE INDEX messages_pending ON messages (account_id, internal_date DESC)
         WHERE body_pending = 1;
     "#,
+    // 5. The words that link somewhere in a body made from HTML, as JSON
+    // [start, end, url] triples. Every stored body's text is made again with
+    // the better newsletter handling: Store::open works through the queue.
+    r#"
+    ALTER TABLE messages ADD COLUMN body_links TEXT;
+    CREATE TABLE body_refresh (message_id INTEGER PRIMARY KEY);
+    INSERT INTO body_refresh (message_id) SELECT id FROM messages;
+    "#,
 ];
 
 pub(super) const LATEST: i64 = MIGRATIONS.len() as i64;

@@ -11,6 +11,7 @@ use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 use rusqlite::{Connection, OptionalExtension, params, types::ValueRef};
 
 use super::Store;
+use crate::{gmail, model::BodyLink};
 
 impl Store {
     /// The HTML version of a stored message, if it has one.
@@ -80,6 +81,76 @@ pub(super) fn compress_moved_html(connection: &mut Connection) -> anyhow::Result
         connection.execute_batch("VACUUM")?;
     }
     Ok(())
+}
+
+/// Migration 5 queued every stored message to have its text made again,
+/// with the better newsletter handling and the links among its words. The
+/// text part itself isn't stored, but the old body text is that part, only
+/// lightly cleaned, unless it was made from the HTML; so each message is
+/// redone from what is here. Works in batches and drops the queue at the end.
+pub(super) fn refresh_body_text(connection: &mut Connection) -> anyhow::Result<()> {
+    let queued: bool = connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'body_refresh')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !queued {
+        return Ok(());
+    }
+    loop {
+        let transaction = connection.transaction()?;
+        let batch: Vec<(i64, Option<String>, Option<String>)> = {
+            let mut select = transaction.prepare(
+                "SELECT r.message_id, m.body_text, b.html FROM body_refresh r
+                 LEFT JOIN messages m ON m.id = r.message_id
+                 LEFT JOIN message_bodies b ON b.message_id = r.message_id
+                 LIMIT 200",
+            )?;
+            select
+                .query_map([], |row| {
+                    let html = match row.get_ref(2)? {
+                        ValueRef::Null => None,
+                        value => Some(read_html(value)?),
+                    };
+                    Ok((row.get(0)?, row.get(1)?, html))
+                })?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        if batch.is_empty() {
+            break;
+        }
+        {
+            let mut update = transaction
+                .prepare("UPDATE messages SET body_text = ?2, body_links = ?3 WHERE id = ?1")?;
+            let mut done = transaction.prepare("DELETE FROM body_refresh WHERE message_id = ?1")?;
+            for (message_id, old, html) in &batch {
+                // A message deleted since it was queued has nothing to redo.
+                if let Some(old) = old {
+                    let (text, links) = refreshed(old, html.as_deref());
+                    if text != *old || !links.is_empty() {
+                        update.execute(params![message_id, text, super::links_to_json(&links)?])?;
+                    }
+                }
+                done.execute([message_id])?;
+            }
+        }
+        transaction.commit()?;
+    }
+    connection.execute_batch("DROP TABLE body_refresh")?;
+    Ok(())
+}
+
+/// Text made from the HTML before is made again, now with its links; text
+/// from a text part is judged again, and kept or replaced by the HTML's.
+/// Line breaks changed since, so the words alone tell which it was.
+fn refreshed(old: &str, html: Option<&str>) -> (String, Vec<BodyLink>) {
+    let from_html = html.is_some_and(|html| {
+        gmail::html_text(html)
+            .split_whitespace()
+            .eq(old.split_whitespace())
+    });
+    let plain = (!from_html).then_some(old);
+    gmail::body(plain, html)
 }
 
 fn compress(html: &str) -> std::io::Result<Vec<u8>> {

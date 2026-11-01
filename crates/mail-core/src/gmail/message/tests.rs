@@ -165,3 +165,37 @@ fn missing_payload_is_an_empty_message() {
     assert_eq!(message.body_text, "");
     assert!(message.attachments.is_empty());
 }
+
+#[test]
+fn a_text_part_stripped_from_html_gives_way_to_the_html() {
+    // What many newsletters send as their "plain text".
+    let stripped = "Your order is on its way!&nbsp;\n\n\n\n        \n                Order 42 has been dispatched\n";
+    let html = r#"<h1>Your order is on its way!</h1><p>Order 42 has been dispatched.</p>
+        <p><a href="https://shop.example/track/42">Track your order</a></p>"#;
+    let (text, links) = body(Some(stripped), Some(html));
+    assert_eq!(
+        text,
+        "Your order is on its way!\n\nOrder 42 has been dispatched.\n\nTrack your order"
+    );
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].url, "https://shop.example/track/42");
+}
+
+#[test]
+fn a_written_text_part_is_kept_with_its_indentation() {
+    let written = "Hi Ana,\r\n\r\n\r\n\r\nThe fix:\r\n\r\n    let x = 1;   \r\n\r\nThanks";
+    let (text, links) = body(Some(written), Some("<p>Hi Ana, the fix…</p>"));
+    assert_eq!(text, "Hi Ana,\n\nThe fix:\n\n    let x = 1;\n\nThanks");
+    assert!(links.is_empty());
+}
+
+#[test]
+fn a_list_of_tracking_links_counts_as_machine_made() {
+    let link = format!("https://click.shop.example/?q={}", "x".repeat(80));
+    let plain = format!("Sale\n{link}\n{link}\n{link}\n{link}\n{link}\n");
+    let (text, _) = body(
+        Some(&plain),
+        Some("<p><a href=\"https://shop.example\">Sale</a></p>"),
+    );
+    assert_eq!(text, "Sale");
+}

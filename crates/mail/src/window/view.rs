@@ -9,7 +9,7 @@ use egui::{
 use std::{collections::HashMap, ops::Range, path::PathBuf};
 
 use mail_core::{
-    model::{Account, Attachment, LabelKind, Message, ThreadSummary},
+    model::{Account, Attachment, BodyLink, LabelKind, Message, ThreadSummary},
     paths::Paths,
 };
 
@@ -1152,12 +1152,13 @@ fn expanded_message(
     );
     ui.add_space(12.0);
 
-    let body_text = if message.body_text.trim().is_empty() {
-        message.snippet.as_str()
+    // Link words point into the body text, so a snippet stands in without them.
+    let (body_text, link_words) = if message.body_text.trim().is_empty() {
+        (message.snippet.as_str(), &[][..])
     } else {
-        message.body_text.as_str()
+        (message.body_text.as_str(), message.body_links.as_slice())
     };
-    if let Some(url) = body(ui, body_text) {
+    if let Some(url) = body(ui, body_text, link_words) {
         actions.push(Action::OpenLink(url));
     }
     if message.body_pending {
@@ -1188,9 +1189,10 @@ fn expanded_message(
 /// A message body as selectable text, with web and email links in the
 /// accent color. Returns the link clicked, if any. Mail is untrusted input,
 /// so a link opens only on a click, and hovering shows its full address.
-fn body(ui: &mut egui::Ui, text: &str) -> Option<String> {
+fn body(ui: &mut egui::Ui, text: &str, link_words: &[BodyLink]) -> Option<String> {
     let palette = theme::palette(ui.ctx());
-    let found = links::find(text);
+    let (text, found) = shown_text(text, link_words);
+    let text = text.as_str();
     let plain = TextFormat {
         font_id: theme::regular(17.0),
         line_height: Some(26.0),
@@ -1203,10 +1205,18 @@ fn body(ui: &mut egui::Ui, text: &str) -> Option<String> {
     };
     let mut job = LayoutJob::default();
     let mut written = 0;
-    for link in &found {
-        job.append(&text[written..link.range.start], 0.0, plain.clone());
-        job.append(&text[link.range.clone()], 0.0, linked.clone());
-        written = link.range.end;
+    for (range, _) in &found {
+        job.append(&text[written..range.start], 0.0, plain.clone());
+        // A link over several lines, such as a whole job card, reads better
+        // in the text color; hovering still underlines it.
+        let words = &text[range.clone()];
+        let format = if words.contains('\n') {
+            &plain
+        } else {
+            &linked
+        };
+        job.append(words, 0.0, format.clone());
+        written = range.end;
     }
     job.append(&text[written..], 0.0, plain);
     job.wrap.max_width = ui.available_width();
@@ -1216,12 +1226,12 @@ fn body(ui: &mut egui::Ui, text: &str) -> Option<String> {
     let pointer = response.hover_pos()?;
     let index = char_at(&galley, pointer - response.rect.min)?;
     // The galley counts characters, the links bytes.
-    let (link, chars) = found
+    let (url, chars) = found
         .iter()
-        .map(|link| {
-            let start = text[..link.range.start].chars().count();
-            let end = start + text[link.range.clone()].chars().count();
-            (link, start..end)
+        .map(|(range, url)| {
+            let start = text[..range.start].chars().count();
+            let end = start + text[range.clone()].chars().count();
+            (url, start..end)
         })
         .find(|(_, chars)| chars.contains(&index))?;
 
@@ -1234,8 +1244,54 @@ fn body(ui: &mut egui::Ui, text: &str) -> Option<String> {
         );
     }
     let clicked = response.clicked();
-    response.on_hover_text_at_pointer(&link.url);
-    clicked.then(|| link.url.clone())
+    response.on_hover_text_at_pointer(url);
+    clicked.then(|| url.clone())
+}
+
+/// The body as the reader shows it, and each link's place in that text: the
+/// words that link (from the HTML) and the addresses written in the text,
+/// long ones shortened to their site.
+fn shown_text(text: &str, link_words: &[BodyLink]) -> (String, Vec<(Range<usize>, String)>) {
+    // Linked words come first; an address inside them stays part of them.
+    let mut found: Vec<(Range<usize>, String, bool)> = link_words
+        .iter()
+        .filter(|link| {
+            link.start < link.end
+                && text.is_char_boundary(link.start)
+                && text.is_char_boundary(link.end)
+                && links::is_openable(&link.url)
+        })
+        .map(|link| (link.start..link.end, link.url.clone(), false))
+        .collect();
+    for address in links::find(text) {
+        let overlaps = found
+            .iter()
+            .any(|(range, ..)| range.start < address.range.end && address.range.start < range.end);
+        if !overlaps {
+            found.push((address.range, address.url, true));
+        }
+    }
+    found.sort_by_key(|(range, ..)| range.start);
+
+    let mut shown = String::with_capacity(text.len());
+    let mut placed = Vec::with_capacity(found.len());
+    let mut written = 0;
+    for (range, url, is_address) in found {
+        // Overlapping words from a malformed message: keep the first.
+        if range.start < written {
+            continue;
+        }
+        shown.push_str(&text[written..range.start]);
+        let start = shown.len();
+        match is_address.then(|| links::shorten(&url)).flatten() {
+            Some(short) => shown.push_str(&short),
+            None => shown.push_str(&text[range.clone()]),
+        }
+        placed.push((start..shown.len(), url));
+        written = range.end;
+    }
+    shown.push_str(&text[written..]);
+    (shown, placed)
 }
 
 /// Each character's glyph in a galley: its index and its box, relative to
@@ -1582,6 +1638,53 @@ mod tests {
             .unwrap();
         let texture = load_photo(&ctx, &paths, "Me@Example.com").expect("decodes");
         assert_eq!(texture.size(), [128, 128]);
+    }
+
+    #[test]
+    fn link_words_open_their_address_and_long_addresses_show_their_site() {
+        let tracking = format!("https://click.news.example.com/?q={}", "z".repeat(90));
+        let text = format!("Track your order or see {tracking} and https://rail.example/b");
+        let words = [BodyLink {
+            start: 0,
+            end: 16,
+            url: "https://shop.example/track".into(),
+        }];
+        let (shown, links) = shown_text(&text, &words);
+        assert_eq!(
+            shown,
+            "Track your order or see click.news.example.com/… and https://rail.example/b"
+        );
+        let placed: Vec<(&str, &str)> = links
+            .iter()
+            .map(|(range, url)| (&shown[range.clone()], url.as_str()))
+            .collect();
+        assert_eq!(
+            placed,
+            [
+                ("Track your order", "https://shop.example/track"),
+                ("click.news.example.com/…", tracking.as_str()),
+                ("https://rail.example/b", "https://rail.example/b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn link_words_that_dont_fit_the_text_are_ignored() {
+        let words = [
+            BodyLink {
+                start: 2,
+                end: 99,
+                url: "https://shop.example".into(),
+            },
+            BodyLink {
+                start: 0,
+                end: 2,
+                url: "javascript:alert(1)".into(),
+            },
+        ];
+        let (shown, links) = shown_text("Hello", &words);
+        assert_eq!(shown, "Hello");
+        assert!(links.is_empty());
     }
 
     #[test]

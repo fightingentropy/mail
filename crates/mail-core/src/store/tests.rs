@@ -688,3 +688,84 @@ fn migration_moves_existing_html_out_and_compresses_it() {
     // Search still works on the rebuilt table.
     assert_eq!(ids(&store.search(1, &query("digest")).unwrap()), ["m1"]);
 }
+
+#[test]
+fn link_words_are_stored_with_the_message() {
+    let mut store = Store::in_memory();
+    let account = store.add_account("me@example.com").unwrap();
+    let message = Message {
+        gmail_id: "m1".into(),
+        thread_id: "t1".into(),
+        body_text: "Track your order".into(),
+        body_links: vec![BodyLink {
+            start: 0,
+            end: 16,
+            url: "https://shop.example/track".into(),
+        }],
+        ..Message::default()
+    };
+    store
+        .save_messages(account.id, std::slice::from_ref(&message))
+        .unwrap();
+    let stored = store.message(account.id, "m1").unwrap().unwrap();
+    assert_eq!(stored.body_links, message.body_links);
+}
+
+#[test]
+fn stored_bodies_are_made_again_once() {
+    let mut store = Store::in_memory();
+    let account = store.add_account("me@example.com").unwrap();
+    let html = r#"<p>Dispatched</p><p><a href="https://shop.example/t">Track it</a></p>"#;
+    let newsletter = Message {
+        gmail_id: "news".into(),
+        thread_id: "news".into(),
+        // As an older Mail stored a stripped-HTML text part.
+        body_text: "Dispatched&nbsp;\n\n\n\n      Track it".into(),
+        body_html: Some(html.into()),
+        ..Message::default()
+    };
+    let letter = Message {
+        gmail_id: "letter".into(),
+        thread_id: "letter".into(),
+        body_text: "Hi,\n\n\n\nSee you.".into(),
+        ..Message::default()
+    };
+    store
+        .save_messages(account.id, &[newsletter, letter])
+        .unwrap();
+    store
+        .connection()
+        .execute_batch(
+            "CREATE TABLE body_refresh (message_id INTEGER PRIMARY KEY);
+             INSERT INTO body_refresh (message_id) SELECT id FROM messages;",
+        )
+        .unwrap();
+    bodies::refresh_body_text(&mut store.connection).unwrap();
+
+    let newsletter = store.message(account.id, "news").unwrap().unwrap();
+    assert_eq!(newsletter.body_text, "Dispatched\n\nTrack it");
+    assert_eq!(newsletter.body_links.len(), 1);
+    let letter = store.message(account.id, "letter").unwrap().unwrap();
+    assert_eq!(letter.body_text, "Hi,\n\nSee you.");
+    // The queue is gone, so this happens once.
+    let queued: bool = store
+        .connection()
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'body_refresh')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!queued);
+    // Search sees the new text.
+    let hits = store
+        .search(
+            account.id,
+            &SearchQuery {
+                text: "track".into(),
+                ..SearchQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+}

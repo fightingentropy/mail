@@ -14,7 +14,7 @@ use std::{collections::HashSet, fs, path::Path, time::Duration};
 use anyhow::{Context, ensure};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
-use crate::model::{Account, Attachment, Label, LabelKind, Message};
+use crate::model::{Account, Attachment, BodyLink, Label, LabelKind, Message};
 pub use search::{Order, SearchHit, SearchQuery};
 pub use threads::ThreadFilter;
 
@@ -47,6 +47,7 @@ impl Store {
         connection.pragma_update(None, "foreign_keys", true)?;
         schema::migrate(&mut connection)?;
         bodies::compress_moved_html(&mut connection)?;
+        bodies::refresh_body_text(&mut connection)?;
         Ok(Self { connection })
     }
 
@@ -93,6 +94,7 @@ impl Store {
             .pragma_update(None, "foreign_keys", true)
             .unwrap();
         schema::migrate(&mut connection).unwrap();
+        bodies::refresh_body_text(&mut connection).unwrap();
         Self { connection }
     }
 
@@ -259,8 +261,8 @@ impl Store {
                     account_id, gmail_id, thread_id, internal_date, subject, from_name,
                     from_addr, to_addrs, cc_addrs, snippet, body_text,
                     message_id_header, in_reply_to, references_header, size_estimate,
-                    body_pending
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                    body_pending, body_links
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                  ON CONFLICT (account_id, gmail_id) DO UPDATE SET
                     thread_id = excluded.thread_id,
                     internal_date = excluded.internal_date,
@@ -275,7 +277,8 @@ impl Store {
                     in_reply_to = excluded.in_reply_to,
                     references_header = excluded.references_header,
                     size_estimate = excluded.size_estimate,
-                    body_pending = excluded.body_pending
+                    body_pending = excluded.body_pending,
+                    body_links = excluded.body_links
                  RETURNING id",
             )?;
             let mut clear_labels =
@@ -308,6 +311,7 @@ impl Store {
                         message.references,
                         message.size_estimate,
                         message.body_pending,
+                        links_to_json(&message.body_links)?,
                     ],
                     |row| row.get(0),
                 )?;
@@ -495,7 +499,7 @@ impl Store {
 const SELECT_MESSAGE: &str = "SELECT id, gmail_id, thread_id, internal_date, subject, from_name,
     from_addr, to_addrs, cc_addrs, snippet, body_text,
     EXISTS (SELECT 1 FROM message_bodies b WHERE b.message_id = messages.id), message_id_header,
-    in_reply_to, references_header, size_estimate, body_pending FROM messages";
+    in_reply_to, references_header, size_estimate, body_pending, body_links FROM messages";
 
 fn message_from_row(row: &Row) -> rusqlite::Result<(i64, Message)> {
     let message = Message {
@@ -509,6 +513,7 @@ fn message_from_row(row: &Row) -> rusqlite::Result<(i64, Message)> {
         cc: row.get(8)?,
         snippet: row.get(9)?,
         body_text: row.get(10)?,
+        body_links: links_from_json(row.get(17)?),
         // HTML stays in the database until asked for: see `message_html`.
         body_html: None,
         has_html: row.get(11)?,
@@ -521,6 +526,29 @@ fn message_from_row(row: &Row) -> rusqlite::Result<(i64, Message)> {
         attachments: Vec::new(),
     };
     Ok((row.get(0)?, message))
+}
+
+/// Links as compact JSON triples, or NULL when there are none.
+fn links_to_json(links: &[BodyLink]) -> anyhow::Result<Option<String>> {
+    if links.is_empty() {
+        return Ok(None);
+    }
+    let triples: Vec<(usize, usize, &str)> = links
+        .iter()
+        .map(|link| (link.start, link.end, link.url.as_str()))
+        .collect();
+    Ok(Some(serde_json::to_string(&triples)?))
+}
+
+/// Unreadable JSON gives no links rather than no message.
+fn links_from_json(json: Option<String>) -> Vec<BodyLink> {
+    let triples: Vec<(usize, usize, String)> = json
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+    triples
+        .into_iter()
+        .map(|(start, end, url)| BodyLink { start, end, url })
+        .collect()
 }
 
 fn account_from_row(row: &Row) -> rusqlite::Result<Account> {

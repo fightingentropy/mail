@@ -86,6 +86,28 @@ fn link_end(text: &str, start: usize) -> usize {
     start + end
 }
 
+/// A long web address as its site, such as `click.example.com/…`, for the
+/// reader to show; the full address is still what opens and what hovering
+/// shows. `None` when it is short enough to show whole.
+pub fn shorten(url: &str) -> Option<String> {
+    const LONGEST: usize = 60;
+    if url.chars().count() <= LONGEST {
+        return None;
+    }
+    let rest = ["https://", "http://"].iter().find_map(|scheme| {
+        url.get(..scheme.len())
+            .filter(|start| start.eq_ignore_ascii_case(scheme))
+            .map(|_| &url[scheme.len()..])
+    })?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // "https://bank.example@other.example/" goes to other.example: show that.
+    let host = authority
+        .rsplit('@')
+        .next()
+        .filter(|host| !host.is_empty())?;
+    Some(format!("{host}/…"))
+}
+
 /// A web link needs a host and an email link an address, so a bare
 /// "https://" or "mailto:" is left alone.
 fn has_destination(rest: &str, scheme: &str) -> bool {
@@ -106,6 +128,22 @@ mod tests {
 
     fn urls(text: &str) -> Vec<String> {
         find(text).into_iter().map(|link| link.url).collect()
+    }
+
+    #[test]
+    fn long_addresses_shorten_to_their_site() {
+        let tracking = format!("https://click.news.example.com/?qs={}", "a1b2".repeat(30));
+        assert_eq!(
+            shorten(&tracking).as_deref(),
+            Some("click.news.example.com/…")
+        );
+        let tricky = format!("https://bank.example@other.example/{}", "x".repeat(60));
+        assert_eq!(shorten(&tricky).as_deref(), Some("other.example/…"));
+        assert_eq!(shorten("https://rail.example/booking/QX7-41K"), None);
+        assert_eq!(
+            shorten(&format!("mailto:{}@example.com", "a".repeat(70))),
+            None
+        );
     }
 
     #[test]

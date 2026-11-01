@@ -124,8 +124,11 @@ pub struct Message {
     pub to: String,
     pub cc: String,
     pub snippet: String,
-    /// Plain text body. Converted from HTML when the message has no text part.
+    /// Plain text body: the text part, or text made from the HTML when there
+    /// is none or it is a poor copy of it.
     pub body_text: String,
+    /// Words in `body_text` that link somewhere, from the HTML.
+    pub body_links: Vec<BodyLink>,
     /// The HTML version, when parsed from Gmail. Messages read back from the
     /// store leave it empty and set `has_html`; `Store::message_html` loads it.
     pub body_html: Option<String>,
@@ -146,6 +149,15 @@ impl Message {
     pub fn has_label(&self, label_id: &str) -> bool {
         self.label_ids.iter().any(|id| id == label_id)
     }
+}
+
+/// Words in a body that link somewhere, as an HTML "Track your order"
+/// button does. Byte offsets into `body_text`; only web and email links.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BodyLink {
+    pub start: usize,
+    pub end: usize,
+    pub url: String,
 }
 
 /// Attachment metadata. Contents are downloaded only when opened.

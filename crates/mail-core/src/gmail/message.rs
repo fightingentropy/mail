@@ -10,7 +10,7 @@ use encoding_rs::{Encoding, UTF_8};
 use serde::Deserialize;
 
 use super::html;
-use crate::model::{Attachment, Message};
+use crate::model::{Attachment, BodyLink, Message};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,11 +109,7 @@ pub fn parse_message(api: ApiMessage) -> Message {
 
     let mut found = Found::default();
     collect(&root, &mut found);
-    let body_text = match (&found.text, &found.html) {
-        (Some(text), _) => clean_plain_text(text),
-        (None, Some(html)) => html::to_text(html),
-        (None, None) => String::new(),
-    };
+    let (body_text, body_links) = body(found.text.as_deref(), found.html.as_deref());
 
     Message {
         gmail_id: api.id,
@@ -126,6 +122,7 @@ pub fn parse_message(api: ApiMessage) -> Message {
         cc: header("Cc").unwrap_or_default(),
         snippet: html::tidy(&html::decode_entities(&api.snippet)),
         body_text,
+        body_links,
         has_html: found.html.is_some(),
         body_pending: false,
         body_html: found.html,
@@ -170,15 +167,77 @@ fn collect(part: &Part, found: &mut Found) {
     }
 }
 
-/// Plain text keeps its own line structure; only line endings and invisible
-/// padding change.
+/// The text to read and search, from a message's text and HTML parts.
+///
+/// A text part written by a person is kept as it is. Many newsletters fill
+/// theirs by stripping tags from the HTML, leaving its indentation, blank
+/// runs and `&nbsp;`s behind; for those the HTML gives better text, and its
+/// links too.
+pub fn body(plain: Option<&str>, html: Option<&str>) -> (String, Vec<BodyLink>) {
+    match (plain, html) {
+        (Some(plain), Some(html)) if is_machine_made(plain) => html::to_text_with_links(html),
+        (Some(plain), _) => (clean_plain_text(plain), Vec::new()),
+        (None, Some(html)) => html::to_text_with_links(html),
+        (None, None) => (String::new(), Vec::new()),
+    }
+}
+
+/// Signs that a text part was made by a mailing tool rather than written:
+/// HTML with the tags taken out (entities left over, lines indented like
+/// markup, long runs of empty lines) or a list of tracking links.
+fn is_machine_made(text: &str) -> bool {
+    let entities = ["&nbsp;", "&zwnj;", "&amp;", "&#"]
+        .iter()
+        .any(|entity| text.contains(entity));
+    let mut blank_run = 0;
+    let mut longest_blank_run = 0;
+    let mut blank_but_spaces = 0;
+    let mut deeply_indented = 0;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            longest_blank_run = longest_blank_run.max(blank_run);
+            if !line.is_empty() {
+                blank_but_spaces += 1;
+            }
+        } else {
+            blank_run = 0;
+            if line.starts_with("        ") {
+                deeply_indented += 1;
+            }
+        }
+    }
+    let tracking_links = text
+        .split_whitespace()
+        .filter(|word| word.contains("://") && word.len() > 80)
+        .count();
+    entities
+        || longest_blank_run >= 4
+        || blank_but_spaces >= 5
+        || deeply_indented >= 5
+        || tracking_links >= 5
+}
+
+/// Plain text keeps its own lines and indentation. Spaces at line ends,
+/// invisible padding and runs of empty lines go: at most one empty line in
+/// a row.
 fn clean_plain_text(text: &str) -> String {
-    let text: String = text
-        .replace("\r\n", "\n")
-        .chars()
-        .filter(|&c| !html::is_invisible(c))
-        .collect();
-    text.trim().to_owned()
+    let visible: String = text.chars().filter(|&c| !html::is_invisible(c)).collect();
+    let mut out = String::with_capacity(visible.len());
+    let mut blank = false;
+    for line in visible.lines().map(str::trim_end) {
+        if line.is_empty() {
+            if blank {
+                continue;
+            }
+            blank = true;
+        } else {
+            blank = false;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim().to_owned()
 }
 
 /// Reads `name=value` or `name="value"` from a header like Content-Type.

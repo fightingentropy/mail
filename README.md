@@ -120,7 +120,11 @@ Triage applies locally at once and waits in a queue until the next sync sends
 it to Gmail, so it works offline too.
 
 The reader shows mail as plain text. Web and email links are in blue: hover
-one to see its full address, click to open it. Click an attachment to save
+one to see its full address, click to open it. Newsletters often send a
+"plain text" version that is their HTML with the tags stripped out, full of
+gaps and tracking links; Mail spots those and reads the HTML instead, so you
+get the words with "Track your order" itself clickable. A long address left
+in a message shows as just its site, such as `click.shop.example/…`. Click an attachment to save
 it to Downloads and open it; anything that could run code (apps, scripts,
 installers, archives) is shown in Finder instead of opened. For mail that
 needs its layout, `h` opens the original HTML in your browser. Scripts are

@@ -274,6 +274,21 @@ Rules:
    address on hover, opened only on a click), attachments on demand, the HTML
    view, and a light palette that follows the macOS appearance.
 
+   *Readable newsletters* (added after): a text part is kept as written
+   unless it looks machine-made (leftover `&nbsp;`, markup indentation, four
+   or more empty lines in a row, five or more tracking links over 80
+   characters), in which case the HTML gives the text. The HTML converter
+   breaks lines like a browser (a `div` or row ends a line, a `p` or table a
+   paragraph), reads past `>` inside quoted attributes, and keeps each
+   link's words in the text with its address beside it as `body_links`
+   (byte ranges, JSON in its own column), so search never indexes tracking
+   URLs and the reader makes the words clickable. Addresses still written in
+   a text part show as their host when longer than 60 characters, and the
+   host shown is the one after any `user@`. Migration 5 queued every stored
+   message and `Store::open` made its text again once: on a real mailbox,
+   messages with blank-line gaps went from 136 of 463 to none, in about a
+   second.
+
    *Shortcuts as data* (added after): `keys.rs` holds a keymap from actions
    to shortcuts instead of a hard-coded match. Each action has Gmail's
    letter and a macOS chord (`⌘⌫` trash, `⌃⌘A` archive, `⌘R` reply, `⌘K`

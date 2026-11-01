@@ -16,6 +16,7 @@ pub use client::{GmailClient, http_agent};
 pub(crate) use message::decode_words;
 pub(crate) use message::split_address;
 pub use message::{ApiMessage, parse_message};
+pub(crate) use {html::to_text as html_text, message::body};
 
 pub trait GmailApi: Sync {
     fn profile(&self) -> anyhow::Result<Profile>;
