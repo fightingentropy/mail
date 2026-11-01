@@ -78,7 +78,8 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // Finder may pass a process serial number when it opens Mail.app.
+    let cli = Cli::parse_from(std::env::args().filter(|argument| !argument.starts_with("-psn_")));
     let paths = match cli.data_dir {
         Some(root) => Paths::under(&root),
         None => match Paths::discover() {

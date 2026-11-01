@@ -261,7 +261,11 @@ Rules:
    back, deleted. Mail still never sends. Sending from the window, behind an
    explicit confirmation, is a separate decision; until then you send from
    Gmail.
-4. **Polish.** Apple Silicon `.app` bundle and a `mail` symlink for the CLI.
+4. **Polish.** *App bundle done:* `packaging/macos/build-app.sh` builds an
+   Apple Silicon `Mail.app` (bundle ID `org.erlin.mail`, ad-hoc signed),
+   installs it in `/Applications` and refuses to replace any other app of that
+   name. The icon is drawn in code (`examples/render_icon.rs`). Still to do:
+   notarized releases and a `mail` symlink for the CLI.
    Done early: *attachments on demand*, fetched with
    `messages.attachments.get` (20 quota units) on a worker thread and saved
    to Downloads under a name that never replaces a file. Gmail can retire an

@@ -32,6 +32,15 @@ cargo install --locked --path crates/mail
 `~/.cargo/bin/mail` takes the place of macOS's old `/usr/bin/mail` when
 `~/.cargo/bin` comes first in your `PATH`, which is rustup's default.
 
+To get the window as an app in `/Applications`, with its own icon:
+
+```bash
+packaging/macos/build-app.sh --install --open
+```
+
+It is signed for your Mac only, not notarized. It sits beside Apple's Mail,
+which stays where it is in `/System/Applications`.
+
 Then connect your Gmail. This uses your own Google Cloud OAuth client; the
 [setup guide](docs/google-setup.md) takes about ten minutes.
 
