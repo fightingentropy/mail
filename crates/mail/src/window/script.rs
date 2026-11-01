@@ -2,11 +2,12 @@
 //! handling can be checked without a person at the keyboard.
 //!
 //! Steps are separated by spaces: a key name (`j`, `esc`, `enter`, `down`,
-//! `/`, `#`, `?`) or `text:` followed by characters to type.
+//! `/`, `#`, `?`), `text:` followed by characters to type, or `click:x,y`
+//! and `hover:x,y` in points from the window's top left.
 
 use std::collections::VecDeque;
 
-use egui::{Event, Key, Modifiers};
+use egui::{Event, Key, Modifiers, PointerButton, Pos2};
 
 pub fn parse(script: &str) -> VecDeque<Vec<Event>> {
     script.split_whitespace().map(step).collect()
@@ -15,6 +16,12 @@ pub fn parse(script: &str) -> VecDeque<Vec<Event>> {
 fn step(token: &str) -> Vec<Event> {
     if let Some(text) = token.strip_prefix("text:") {
         return vec![Event::Text(text.to_owned())];
+    }
+    if let Some(pos) = token.strip_prefix("click:").and_then(point) {
+        return click(pos);
+    }
+    if let Some(pos) = token.strip_prefix("hover:").and_then(point) {
+        return vec![Event::PointerMoved(pos)];
     }
     let named = match token {
         "esc" => Some(Key::Escape),
@@ -41,6 +48,21 @@ fn step(token: &str) -> Vec<Event> {
             events
         }
     }
+}
+
+fn point(text: &str) -> Option<Pos2> {
+    let (x, y) = text.split_once(',')?;
+    Some(Pos2::new(x.parse().ok()?, y.parse().ok()?))
+}
+
+fn click(pos: Pos2) -> Vec<Event> {
+    let button = |pressed| Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    vec![Event::PointerMoved(pos), button(true), button(false)]
 }
 
 fn press(key: Key, modifiers: Modifiers) -> Event {

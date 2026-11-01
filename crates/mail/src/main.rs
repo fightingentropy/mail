@@ -33,8 +33,17 @@ struct Cli {
     /// Keys to press in the demo before a screenshot, e.g. "j e / text:seat".
     #[arg(long, value_name = "KEYS", hide = true, requires = "demo")]
     demo_keys: Option<String>,
+    /// Draw the window light or dark instead of following macOS.
+    #[arg(long, value_enum, hide = true)]
+    appearance: Option<Appearance>,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Appearance {
+    Light,
+    Dark,
 }
 
 #[derive(Subcommand)]
@@ -86,6 +95,10 @@ fn main() -> ExitCode {
                 demo: cli.demo,
                 screenshot: cli.screenshot,
                 demo_keys: cli.demo_keys,
+                appearance: cli.appearance.map(|appearance| match appearance {
+                    Appearance::Light => egui::Theme::Light,
+                    Appearance::Dark => egui::Theme::Dark,
+                }),
             },
         ),
         Some(Command::Auth { client }) => commands::auth(&paths, client.as_deref()),

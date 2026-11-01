@@ -14,7 +14,7 @@ use crate::store::SearchQuery;
 
 const DAY: i64 = 86_400_000;
 
-struct FakeGmail {
+pub(crate) struct FakeGmail {
     state: Mutex<State>,
 }
 
@@ -24,22 +24,26 @@ struct State {
     /// Changes since `history_start`; `None` once Gmail has expired them.
     history: Option<Vec<HistoryRecord>>,
     fetches: usize,
+    /// Attachment contents by the attachment ID Gmail currently accepts.
+    attachments: BTreeMap<String, Vec<u8>>,
     /// A message whose download fails, like a quota error that outlasts retries.
     failing: Option<String>,
-    /// Every call that changes the mailbox, in order, plus "history" reads.
+    /// Every call that changes the mailbox, in order, plus "history" and
+    /// attachment reads.
     calls: Vec<String>,
     /// When set, thread changes fail as if the network were down.
     offline: bool,
 }
 
 impl FakeGmail {
-    fn new(messages: Vec<ApiMessage>) -> Self {
+    pub(crate) fn new(messages: Vec<ApiMessage>) -> Self {
         Self {
             state: Mutex::new(State {
                 history_id: 100,
                 messages: messages.into_iter().map(|m| (m.id.clone(), m)).collect(),
                 history: Some(Vec::new()),
                 fetches: 0,
+                attachments: BTreeMap::new(),
                 failing: None,
                 calls: Vec::new(),
                 offline: false,
@@ -78,19 +82,43 @@ impl FakeGmail {
         self.state.lock().unwrap().history = None;
     }
 
-    fn fetches(&self) -> usize {
+    pub(crate) fn fetches(&self) -> usize {
         self.state.lock().unwrap().fetches
+    }
+
+    pub(crate) fn add_attachment(&self, attachment_id: &str, contents: &[u8]) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .attachments
+            .insert(attachment_id.to_owned(), contents.to_vec());
+    }
+
+    /// Issues a new ID for an attachment, as Gmail may, and stops accepting
+    /// the old one.
+    pub(crate) fn rotate_attachment(&self, old_id: &str, new_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        let contents = state.attachments.remove(old_id).unwrap();
+        state.attachments.insert(new_id.to_owned(), contents);
+        for message in state.messages.values_mut() {
+            for part in message.payload.iter_mut().flat_map(|root| &mut root.parts) {
+                if let Some(body) = &mut part.body
+                    && body.attachment_id.as_deref() == Some(old_id)
+                {
+                    body.attachment_id = Some(new_id.to_owned());
+                }
+            }
+        }
     }
 
     fn fail_on(&self, id: Option<&str>) {
         self.state.lock().unwrap().failing = id.map(str::to_owned);
     }
 
-    fn calls(&self) -> Vec<String> {
+    pub(crate) fn calls(&self) -> Vec<String> {
         self.state.lock().unwrap().calls.clone()
     }
 
-    fn set_offline(&self, offline: bool) {
+    pub(crate) fn set_offline(&self, offline: bool) {
         self.state.lock().unwrap().offline = offline;
     }
 
@@ -199,6 +227,18 @@ impl GmailApi for FakeGmail {
             anyhow::bail!("quota exceeded");
         }
         Ok(state.messages.get(id).cloned())
+    }
+
+    fn attachment(&self, message_id: &str, attachment_id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let mut state = self.state.lock().unwrap();
+        if state.offline {
+            anyhow::bail!("network unreachable");
+        }
+        state.calls.push(format!("attachment {attachment_id}"));
+        if !state.messages.contains_key(message_id) {
+            return Ok(None);
+        }
+        Ok(state.attachments.get(attachment_id).cloned())
     }
 
     fn history(

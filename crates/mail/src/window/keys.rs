@@ -48,6 +48,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("z", "Undo"),
     ("/", "Search"),
     ("Space", "Scroll the conversation"),
+    ("h", "Open the HTML version in your browser"),
     ("g i", "Go to Inbox"),
     ("g s", "Go to Starred"),
     ("g t", "Go to Sent"),
@@ -105,6 +106,7 @@ impl Keys {
                 Key::S => act(Action::ToggleStar),
                 Key::L => act(Action::OpenPicker),
                 Key::Z => act(Action::Undo),
+                Key::H => act(Action::OpenHtml),
                 // Shift+/ is "?", handled as text above.
                 Key::Slash if !modifiers.shift => Some(Command::FocusSearch),
                 Key::Space if modifiers.shift => Some(Command::ScrollReader(-1.0)),
@@ -195,6 +197,16 @@ mod tests {
             keys.command(&key(Key::Escape), Focus::Search),
             Some(Command::Act(Action::ClearSearch))
         );
+    }
+
+    #[test]
+    fn h_opens_the_html_version_but_not_while_searching() {
+        let mut keys = Keys::default();
+        assert_eq!(
+            keys.command(&key(Key::H), Focus::List),
+            Some(Command::Act(Action::OpenHtml))
+        );
+        assert_eq!(keys.command(&key(Key::H), Focus::Search), None);
     }
 
     #[test]

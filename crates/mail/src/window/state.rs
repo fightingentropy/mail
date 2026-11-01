@@ -8,7 +8,7 @@ use std::{
 };
 
 use mail_core::{
-    model::{Account, Change, Label, LabelKind, Message, ThreadSummary},
+    model::{Account, Attachment, Change, Label, LabelKind, Message, ThreadSummary},
     store::{Order, SearchQuery, Store, ThreadFilter},
 };
 
@@ -55,6 +55,31 @@ pub enum Action {
     ToggleHelp,
     CloseHelp,
     ToggleExpanded(usize),
+    /// A link clicked in a body.
+    OpenLink(String),
+    /// An attachment chip clicked: the open thread's message and attachment.
+    Download {
+        message: usize,
+        attachment: usize,
+    },
+    /// Shows the newest expanded message's HTML in the browser.
+    OpenHtml,
+}
+
+/// Work for the window shell that the model can't do itself: open a link,
+/// download an attachment, show HTML in the browser. Each one follows a
+/// click or a key press.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Effect {
+    OpenLink(String),
+    Download {
+        message_id: String,
+        attachment: Attachment,
+    },
+    OpenHtml {
+        message_id: String,
+        html: String,
+    },
 }
 
 /// The thread in the reader.
@@ -96,6 +121,8 @@ pub struct Model {
     pub notice: Option<String>,
     /// Set after a change, so the window can ask sync to send it.
     pub wants_sync: bool,
+    /// Waiting for the shell, oldest first.
+    pub effects: Vec<Effect>,
     undo: Option<Undo>,
     viewed_since: Option<Instant>,
 }
@@ -117,6 +144,7 @@ impl Model {
             help: false,
             notice: None,
             wants_sync: false,
+            effects: Vec::new(),
             undo: None,
             viewed_since: None,
         };
@@ -285,6 +313,27 @@ impl Model {
                     *expanded = !*expanded;
                 }
             }
+            Action::OpenLink(url) => self.effects.push(Effect::OpenLink(url)),
+            Action::Download {
+                message,
+                attachment,
+            } => {
+                let found = self
+                    .open
+                    .as_ref()
+                    .and_then(|open| open.messages.get(message))
+                    .and_then(|message| {
+                        let attachment = message.attachments.get(attachment)?.clone();
+                        Some((message.gmail_id.clone(), attachment))
+                    });
+                if let Some((message_id, attachment)) = found {
+                    self.effects.push(Effect::Download {
+                        message_id,
+                        attachment,
+                    });
+                }
+            }
+            Action::OpenHtml => self.open_html(),
         }
         Ok(())
     }
@@ -307,6 +356,28 @@ impl Model {
         self.wants_sync = true;
         self.reload()?;
         Ok(None)
+    }
+
+    /// The newest expanded message with an HTML version goes to the browser:
+    /// that is the message on screen, or the one you just expanded.
+    fn open_html(&mut self) {
+        let Some(open) = &self.open else {
+            return;
+        };
+        let newest = open
+            .messages
+            .iter()
+            .zip(&open.expanded)
+            .rev()
+            .filter(|(_, expanded)| **expanded)
+            .find_map(|(message, _)| {
+                let html = message.body_html.as_ref()?;
+                (!html.trim().is_empty()).then(|| (message.gmail_id.clone(), html.clone()))
+            });
+        match newest {
+            Some((message_id, html)) => self.effects.push(Effect::OpenHtml { message_id, html }),
+            None => self.notice = Some("This message has no HTML version.".into()),
+        }
     }
 
     fn move_selection(&mut self, step: isize) -> anyhow::Result<()> {

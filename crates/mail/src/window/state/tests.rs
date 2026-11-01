@@ -194,3 +194,80 @@ fn long_threads_open_with_only_the_latest_and_unread_expanded() {
     model.apply(Action::ToggleExpanded(0)).unwrap();
     assert_eq!(model.open.as_ref().unwrap().expanded, [true, false, true]);
 }
+
+fn select(model: &mut Model, subject: &str) {
+    let index = model
+        .threads
+        .iter()
+        .position(|t| t.subject == subject)
+        .unwrap();
+    model.apply(Action::Select(index)).unwrap();
+}
+
+#[test]
+fn clicking_an_attachment_asks_the_shell_to_download_it() {
+    let (mut model, _folder) = model();
+    select(&mut model, "Your e-ticket: London to Edinburgh");
+    model
+        .apply(Action::Download {
+            message: 0,
+            attachment: 0,
+        })
+        .unwrap();
+    let [
+        Effect::Download {
+            message_id,
+            attachment,
+        },
+    ] = model.effects.as_slice()
+    else {
+        panic!("expected one download, got {:?}", model.effects);
+    };
+    assert_eq!(
+        message_id,
+        &model.open.as_ref().unwrap().messages[0].gmail_id
+    );
+    assert_eq!(attachment.filename, "eticket-QX741K.pdf");
+
+    // A stale click, after the thread changed, asks for nothing.
+    model
+        .apply(Action::Download {
+            message: 0,
+            attachment: 5,
+        })
+        .unwrap();
+    assert_eq!(model.effects.len(), 1);
+}
+
+#[test]
+fn links_open_only_through_the_shell() {
+    let (mut model, _folder) = model();
+    let url = "https://northline.example/booking/QX7-41K".to_owned();
+    model.apply(Action::OpenLink(url.clone())).unwrap();
+    assert_eq!(model.effects, [Effect::OpenLink(url)]);
+}
+
+#[test]
+fn h_opens_the_html_of_the_message_on_screen() {
+    let (mut model, _folder) = model();
+    select(
+        &mut model,
+        "This week: async traits, SQLite tips and egui 0.36",
+    );
+    model.apply(Action::OpenHtml).unwrap();
+    let [Effect::OpenHtml { html, .. }] = model.effects.as_slice() else {
+        panic!("expected HTML, got {:?}", model.effects);
+    };
+    assert!(html.contains("<h1"));
+}
+
+#[test]
+fn plain_text_mail_says_it_has_no_html() {
+    let (mut model, _folder) = model();
+    model.apply(Action::OpenHtml).unwrap();
+    assert!(model.effects.is_empty());
+    assert_eq!(
+        model.notice.as_deref(),
+        Some("This message has no HTML version.")
+    );
+}

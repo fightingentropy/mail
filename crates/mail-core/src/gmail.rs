@@ -4,6 +4,7 @@
 //! real sync logic against an in-memory mailbox. There is deliberately no
 //! method that sends mail.
 
+pub mod attachments;
 mod client;
 mod html;
 mod message;
@@ -23,6 +24,10 @@ pub trait GmailApi: Sync {
     fn message_ids(&self, query: &str, page_token: Option<&str>) -> anyhow::Result<IdPage>;
     /// A full message without attachment contents. `None` if it no longer exists.
     fn message(&self, id: &str) -> anyhow::Result<Option<ApiMessage>>;
+    /// An attachment's contents. `None` when Gmail no longer accepts this
+    /// attachment ID or the message is gone: Gmail can issue new attachment
+    /// IDs, so the caller reads the message again for a fresh one.
+    fn attachment(&self, message_id: &str, attachment_id: &str) -> anyhow::Result<Option<Vec<u8>>>;
     /// Changes since `start_history_id`. `None` when Gmail no longer has
     /// history that old (usually after about a week), which needs a full sync.
     fn history(

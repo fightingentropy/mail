@@ -95,7 +95,7 @@ impl Part {
 }
 
 /// Gmail's base64url sometimes has padding and sometimes doesn't.
-const BASE64URL: GeneralPurpose = GeneralPurpose::new(
+pub(super) const BASE64URL: GeneralPurpose = GeneralPurpose::new(
     &alphabet::URL_SAFE,
     GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
 );
