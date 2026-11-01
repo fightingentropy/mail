@@ -67,6 +67,9 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("Mail")
             .with_app_id("org.erlin.mail")
+            // An empty icon keeps eframe from swapping the Dock icon for its
+            // own logo, so the Dock shows Mail.app's icon like everywhere else.
+            .with_icon(egui::IconData::default())
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([980.0, 600.0]),
         persist_window: !options.demo,
