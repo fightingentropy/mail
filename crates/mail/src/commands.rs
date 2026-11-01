@@ -82,11 +82,18 @@ pub fn sync(paths: &Paths, days: u32) -> anyhow::Result<()> {
         days,
         ..SyncOptions::default()
     };
+    let mut downloading_since: Option<Instant> = None;
     let report = sync::sync(&mut store, &gmail, &account, &options, &mut |progress| {
         if show_progress {
             let line = match progress {
                 Progress::Listing { found } => format!("Listing messages… {found}"),
-                Progress::Downloading { done, total } => format!("Downloading {done} of {total}"),
+                Progress::Downloading { done, total } => {
+                    let since = *downloading_since.get_or_insert_with(Instant::now);
+                    format!(
+                        "Downloading {done} of {total}{}",
+                        time_left(since, done, total)
+                    )
+                }
             };
             eprint!("\r\x1b[2K{line}");
             let _ = std::io::stderr().flush();
@@ -307,6 +314,21 @@ fn shown_labels(label_ids: &[String], names: &HashMap<String, String>) -> String
         String::new()
     } else {
         format!(" · {}", shown.join(", "))
+    }
+}
+
+/// `, about 4 min left`, once enough messages have arrived to estimate. Gmail's
+/// quota sets the pace, so the rate is steady.
+fn time_left(since: Instant, done: usize, total: usize) -> String {
+    if done < 10 || done >= total {
+        return String::new();
+    }
+    let per_message = since.elapsed().as_secs_f64() / done as f64;
+    let seconds = per_message * (total - done) as f64;
+    if seconds < 90.0 {
+        format!(", about {} s left", seconds.ceil() as u64)
+    } else {
+        format!(", about {} min left", (seconds / 60.0).round() as u64)
     }
 }
 

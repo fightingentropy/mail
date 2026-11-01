@@ -66,9 +66,10 @@ mail (CLI, agent CLI, window)  →  mail-core: auth · gmail · sync · store
 
 - **Gmail API with OAuth.** PKCE and a loopback redirect, with the refresh
   token in the macOS Keychain. Mail never sees your password.
-- **Sync.** The first run downloads the last 90 days on parallel workers.
-  After that, Gmail's History API supplies exact changes, usually in a few
-  requests.
+- **Sync.** The first run downloads the last 90 days, paced to Gmail's quota
+  (about 100 messages a minute, so a few minutes for a typical mailbox).
+  After that, Gmail's History API supplies exact changes in a fraction of a
+  second.
 - **Store.** One SQLite file in WAL mode. Messages, labels and attachment
   metadata are stored; attachments download only when opened.
 - **Search.** An FTS5 index over subject, sender, recipients and body,

@@ -57,6 +57,7 @@ The options, against Google's current rules:
 | Access granted | `gmail.modify`: no permanent delete | Full IMAP and SMTP | `gmail.modify` |
 | Google's view | Recommended | "Aren't recommended" | Fine for development |
 | Sync quality | Native threads, labels and drafts; History API for cheap, exact incremental sync | X-GM extensions give thread IDs and labels; no QRESYNC, so deletions need UID diffs | Same as chosen |
+| First sync speed | About 100 messages a minute (quota, see below) | No per-message quota; bounded by bandwidth | Same as chosen |
 | Friction | One "unverified app" warning at sign-in | None | Sign in again weekly |
 
 Why this is allowed: Google exempts personal-use apps with fewer than 100
@@ -72,6 +73,12 @@ Consequences:
   has no send call, and the agent CLI opens the database read-only.
 - A password change revokes the token. `mail sync` then says to run
   `mail auth` again.
+- The first sync is slow by design. Since 1 May 2026 a full message costs 60
+  quota units against 6,000 per user per minute, so Gmail serves about 100
+  messages a minute (found on the first live sync, after the decision). 90
+  days of my mail (452 messages) takes about 5 minutes once; later syncs take
+  a fraction of a second. A much larger mailbox would make IMAP worth
+  reconsidering for the first download, or a quota increase in Google Cloud.
 - If Google ever closes this route, IMAP with an app password is the fallback.
   The store and search don't depend on how mail arrives.
 
@@ -80,7 +87,8 @@ Sources: [OAuth 2.0 refresh token expiration](https://developers.google.com/iden
 [Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes),
 [app passwords](https://support.google.com/accounts/answer/185833),
 [Gmail IMAP extensions](https://developers.google.com/workspace/gmail/imap/imap-extensions),
-[rclone: making your own client ID](https://rclone.org/drive/#making-your-own-client-id).
+[rclone: making your own client ID](https://rclone.org/drive/#making-your-own-client-id),
+[Gmail API usage limits](https://developers.google.com/workspace/gmail/api/reference/quota).
 
 ### Sign-in flow
 
@@ -133,18 +141,23 @@ Choices:
 ## Sync
 
 - **First sync:** read the profile's current `historyId`, list
-  `newer_than:90d`, download each message on 8 worker threads, and write
+  `newer_than:90d`, download each message on 3 worker threads, and write
   batches of 200 per transaction. The history ID is saved only at the end, so
-  an interrupted first sync resumes and skips what it already has.
+  an interrupted or failed first sync keeps what it stored, resumes and skips
+  what it already has.
 - **Later syncs:** replay `users.history.list` from the saved history ID:
   download added messages, set labels from the newest label record, delete
   removed messages. When little has changed this takes a few requests.
 - **Expired history** (Gmail keeps roughly a week): fall back to a full pass,
   which re-downloads the window and deletes local messages Gmail no longer
   lists.
-- **Rate limits:** Gmail allows 250 quota units per user per second, and a
-  message fetch costs 5. On 429, 5xx or a rate-limit 403, Mail backs off
-  exponentially with jitter.
+- **Rate limits:** Gmail allows 6,000 quota units per user per minute. Since
+  1 May 2026 a `format=full` message costs 60 units, a list 5, history 2. The
+  first live sync, with 8 unpaced workers, had 84% of its fetches refused.
+  Mail now books every request through one shared pacer at 95 units a
+  second, about 1.6 full messages a second, so Gmail rarely refuses one. On
+  429, 5xx or a quota 403, all workers pause together, backing off from 2
+  seconds up to a minute.
 - **No background process.** Sync runs when you run `mail sync`, and (from
   milestone 2) while the window is open. Nothing runs when Mail is closed.
 
@@ -216,5 +229,7 @@ Rules:
 - Google could restrict unverified personal-use apps. Fallback: IMAP with an
   app password, behind the same store.
 - More than a week offline means a full resync (minutes, not seconds).
-- A full sync of 90 days is bounded by Gmail's quota, about 50 messages a
-  second.
+- A full sync is bounded by Gmail's quota at about 100 messages a minute:
+  minutes for a personal mailbox, hours for a very busy one. Expired history
+  currently means re-downloading the window; refreshing known messages'
+  labels with `format=minimal` (20 units) would cut that by two thirds.

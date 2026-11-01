@@ -23,6 +23,8 @@ struct State {
     /// Changes since `history_start`; `None` once Gmail has expired them.
     history: Option<Vec<HistoryRecord>>,
     fetches: usize,
+    /// A message whose download fails, like a quota error that outlasts retries.
+    failing: Option<String>,
 }
 
 impl FakeGmail {
@@ -33,6 +35,7 @@ impl FakeGmail {
                 messages: messages.into_iter().map(|m| (m.id.clone(), m)).collect(),
                 history: Some(Vec::new()),
                 fetches: 0,
+                failing: None,
             }),
         }
     }
@@ -70,6 +73,10 @@ impl FakeGmail {
 
     fn fetches(&self) -> usize {
         self.state.lock().unwrap().fetches
+    }
+
+    fn fail_on(&self, id: Option<&str>) {
+        self.state.lock().unwrap().failing = id.map(str::to_owned);
     }
 }
 
@@ -138,6 +145,9 @@ impl GmailApi for FakeGmail {
     fn message(&self, id: &str) -> anyhow::Result<Option<ApiMessage>> {
         let mut state = self.state.lock().unwrap();
         state.fetches += 1;
+        if state.failing.as_deref() == Some(id) {
+            anyhow::bail!("quota exceeded");
+        }
         Ok(state.messages.get(id).cloned())
     }
 
@@ -339,6 +349,28 @@ fn an_interrupted_first_sync_resumes() {
     let report = run(&mut store, &gmail);
     assert_eq!(report.downloaded, 4);
     assert_eq!(gmail.fetches(), 4);
+}
+
+#[test]
+fn a_failed_first_sync_keeps_what_it_downloaded() {
+    let gmail = mailbox();
+    gmail.fail_on(Some("e"));
+    let mut store = Store::in_memory();
+    let account = store.add_account("me@example.com").unwrap();
+    // One worker downloads in listing order, so "e" fails last.
+    let options = SyncOptions {
+        days: 90,
+        workers: 1,
+    };
+    assert!(sync(&mut store, &gmail, &account, &options, &mut |_| {}).is_err());
+    assert_eq!(store.stats(account.id).unwrap().messages, 4);
+    assert!(store.account().unwrap().unwrap().history_id.is_none());
+
+    gmail.fail_on(None);
+    let fetches_before = gmail.fetches();
+    let report = run(&mut store, &gmail);
+    assert_eq!(report.downloaded, 1);
+    assert_eq!(gmail.fetches() - fetches_before, 1);
 }
 
 #[test]

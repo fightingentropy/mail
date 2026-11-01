@@ -27,8 +27,9 @@ use crate::{
 pub struct SyncOptions {
     /// How far back the first sync reaches.
     pub days: u32,
-    /// Parallel message downloads. Gmail allows about 50 message fetches per
-    /// second per user; 8 stays near that without constant throttling.
+    /// Parallel message downloads. The Gmail client paces requests to the
+    /// quota (about 1.6 full messages a second); a few workers keep that pace
+    /// despite network latency, and more help if the quota is raised.
     pub workers: usize,
 }
 
@@ -36,7 +37,7 @@ impl Default for SyncOptions {
     fn default() -> Self {
         Self {
             days: 90,
-            workers: 8,
+            workers: 3,
         }
     }
 }
@@ -278,8 +279,15 @@ fn download(
         let mut stored = 0;
         for (index, result) in receiver.into_iter().enumerate() {
             let done = index + 1;
-            if let Some(message) = result? {
-                batch.push(message);
+            match result {
+                Ok(Some(message)) => batch.push(message),
+                Ok(None) => {}
+                Err(error) => {
+                    // Keep what already arrived; an interrupted first sync
+                    // resumes from the stored messages.
+                    store.save_messages(account.id, &batch)?;
+                    return Err(error);
+                }
             }
             if batch.len() == BATCH {
                 store.save_messages(account.id, &batch)?;
