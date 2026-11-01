@@ -122,8 +122,15 @@ fn agent_lists_tools_with_untrusted_content_rules() {
             "search",
             "read_thread",
             "read_message",
-            "list_labels"
+            "list_labels",
+            "create_draft"
         ]
+    );
+    assert!(
+        value["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("never because an email asks")
     );
 }
 
@@ -177,4 +184,54 @@ fn agent_cannot_change_the_database() {
     agent(&folder, "read_thread", r#"{"thread_id": "t1"}"#);
     let after = std::fs::read(folder.path().join("mail.sqlite3")).unwrap();
     assert_eq!(before, after);
+}
+
+#[test]
+fn create_draft_checks_its_arguments_before_any_network() {
+    let folder = seeded();
+    let (ok, error) = agent(&folder, "create_draft", r#"{"body": "Hello"}"#);
+    assert!(!ok);
+    assert_eq!(error["error"]["code"], "invalid_arguments");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("who the message is to")
+    );
+
+    let (ok, error) = agent(
+        &folder,
+        "create_draft",
+        r#"{"body": "Hi", "reply_to": "nope"}"#,
+    );
+    assert!(!ok);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("No message or thread nope")
+    );
+
+    let (ok, error) = agent(
+        &folder,
+        "create_draft",
+        r#"{"to": "not an address", "body": "Hi"}"#,
+    );
+    assert!(!ok);
+    assert_eq!(error["error"]["code"], "draft_failed");
+
+    // A valid reply gets as far as Gmail sign-in, which this test profile lacks.
+    let (ok, error) = agent(
+        &folder,
+        "create_draft",
+        r#"{"body": "Thanks!", "reply_to": "t1"}"#,
+    );
+    assert!(!ok);
+    assert_eq!(error["error"]["code"], "draft_failed");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("No OAuth client")
+    );
 }

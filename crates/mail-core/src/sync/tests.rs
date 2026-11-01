@@ -14,7 +14,7 @@ use crate::store::SearchQuery;
 
 const DAY: i64 = 86_400_000;
 
-struct FakeGmail {
+pub(crate) struct FakeGmail {
     state: Mutex<State>,
 }
 
@@ -30,10 +30,13 @@ struct State {
     calls: Vec<String>,
     /// When set, thread changes fail as if the network were down.
     offline: bool,
+    /// Saved drafts by ID: the raw RFC 5322 message and its thread.
+    drafts: BTreeMap<String, (Vec<u8>, Option<String>)>,
+    drafts_created: usize,
 }
 
 impl FakeGmail {
-    fn new(messages: Vec<ApiMessage>) -> Self {
+    pub(crate) fn new(messages: Vec<ApiMessage>) -> Self {
         Self {
             state: Mutex::new(State {
                 history_id: 100,
@@ -43,6 +46,8 @@ impl FakeGmail {
                 failing: None,
                 calls: Vec::new(),
                 offline: false,
+                drafts: BTreeMap::new(),
+                drafts_created: 0,
             }),
         }
     }
@@ -86,7 +91,7 @@ impl FakeGmail {
         self.state.lock().unwrap().failing = id.map(str::to_owned);
     }
 
-    fn calls(&self) -> Vec<String> {
+    pub(crate) fn calls(&self) -> Vec<String> {
         self.state.lock().unwrap().calls.clone()
     }
 
@@ -249,6 +254,51 @@ impl GmailApi for FakeGmail {
         self.change_thread(format!("untrash {thread_id}"), thread_id, |labels| {
             labels.retain(|label| label != "TRASH");
         })
+    }
+
+    fn create_draft(&self, raw: &[u8], thread_id: Option<&str>) -> anyhow::Result<String> {
+        let mut state = self.state.lock().unwrap();
+        state.drafts_created += 1;
+        let id = format!("draft-{}", state.drafts_created);
+        state.calls.push(format!("create_draft {id}"));
+        state
+            .drafts
+            .insert(id.clone(), (raw.to_vec(), thread_id.map(str::to_owned)));
+        Ok(id)
+    }
+
+    fn update_draft(
+        &self,
+        draft_id: &str,
+        raw: &[u8],
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<Outcome> {
+        let mut state = self.state.lock().unwrap();
+        if !state.drafts.contains_key(draft_id) {
+            return Ok(Outcome::Gone);
+        }
+        state.calls.push(format!("update_draft {draft_id}"));
+        state.drafts.insert(
+            draft_id.to_owned(),
+            (raw.to_vec(), thread_id.map(str::to_owned)),
+        );
+        Ok(Outcome::Done)
+    }
+
+    fn delete_draft(&self, draft_id: &str) -> anyhow::Result<Outcome> {
+        let mut state = self.state.lock().unwrap();
+        state.calls.push(format!("delete_draft {draft_id}"));
+        Ok(match state.drafts.remove(draft_id) {
+            Some(_) => Outcome::Done,
+            None => Outcome::Gone,
+        })
+    }
+}
+
+impl FakeGmail {
+    /// The raw message and thread of a saved draft.
+    pub(crate) fn draft(&self, id: &str) -> Option<(Vec<u8>, Option<String>)> {
+        self.state.lock().unwrap().drafts.get(id).cloned()
     }
 }
 

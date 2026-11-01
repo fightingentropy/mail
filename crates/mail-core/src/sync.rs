@@ -357,4 +357,4 @@ fn now_millis() -> i64 {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

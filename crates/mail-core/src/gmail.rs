@@ -2,7 +2,7 @@
 //!
 //! Sync talks to [`GmailApi`] rather than to HTTP directly, so tests run the
 //! real sync logic against an in-memory mailbox. There is deliberately no
-//! method that sends mail.
+//! method that sends mail; writing stops at Drafts.
 
 mod client;
 mod html;
@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 pub use client::{GmailClient, http_agent};
 #[cfg(test)]
+pub(crate) use message::decode_words;
 pub(crate) use message::split_address;
 pub use message::{ApiMessage, parse_message};
 
@@ -40,6 +41,17 @@ pub trait GmailApi: Sync {
     ) -> anyhow::Result<Outcome>;
     fn trash_thread(&self, thread_id: &str) -> anyhow::Result<Outcome>;
     fn untrash_thread(&self, thread_id: &str) -> anyhow::Result<Outcome>;
+    /// Saves an RFC 5322 message to Drafts and returns the draft ID. Drafts
+    /// are as far as Mail goes: there is no call that sends.
+    fn create_draft(&self, raw: &[u8], thread_id: Option<&str>) -> anyhow::Result<String>;
+    /// Replaces a draft's message. `Gone` if the draft was sent or deleted.
+    fn update_draft(
+        &self,
+        draft_id: &str,
+        raw: &[u8],
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<Outcome>;
+    fn delete_draft(&self, draft_id: &str) -> anyhow::Result<Outcome>;
 }
 
 /// How Gmail answered a change. Transient failures are errors instead, so

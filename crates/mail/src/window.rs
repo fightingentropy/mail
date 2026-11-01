@@ -4,7 +4,9 @@
 //! responds instantly; a background thread syncs while it is open.
 
 mod background;
+mod compose;
 mod demo;
+mod drafts;
 mod keys;
 mod script;
 mod state;
@@ -14,6 +16,7 @@ mod view;
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, Sender},
     time::Instant,
 };
 
@@ -21,7 +24,8 @@ use anyhow::Context;
 use mail_core::{paths::Paths, store::Store, sync::Progress};
 
 use background::{Event, Syncer};
-use state::Model;
+use drafts::Finished;
+use state::{Action, Model};
 use view::{Screen, SyncStatus};
 
 pub struct Options {
@@ -72,8 +76,9 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
             theme::install(&creation.egui_ctx);
             let syncer = (!demo).then(|| {
                 let ctx = creation.egui_ctx.clone();
-                Syncer::start(paths, move || ctx.request_repaint())
+                Syncer::start(paths.clone(), move || ctx.request_repaint())
             });
+            let (drafts_done, drafts) = mpsc::channel();
             let status = if demo {
                 SyncStatus::Demo
             } else {
@@ -83,6 +88,10 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
                 model,
                 screen: Screen::new(status),
                 syncer,
+                paths,
+                demo,
+                drafts,
+                drafts_done,
                 screenshot: screenshot.map(|path| Screenshot { path, frames: 0 }),
                 script,
                 frames: 0,
@@ -101,6 +110,11 @@ struct Shell {
     model: Model,
     screen: Screen,
     syncer: Option<Syncer>,
+    paths: Paths,
+    demo: bool,
+    /// Results of draft saves and discards running on their own threads.
+    drafts: Receiver<Finished>,
+    drafts_done: Sender<Finished>,
     screenshot: Option<Screenshot>,
     /// Scripted key presses for demo screenshots, one step every few frames.
     script: std::collections::VecDeque<Vec<egui::Event>>,
@@ -128,6 +142,7 @@ impl eframe::App for Shell {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive_sync_events();
+        self.handle_drafts(ctx);
         if let Some(syncer) = &self.syncer
             && (std::mem::take(&mut self.model.wants_sync)
                 || std::mem::take(&mut self.screen.sync_requested))
@@ -189,6 +204,55 @@ impl Shell {
                 }
                 Event::Failed(error) => self.screen.status = SyncStatus::Failed(error),
             }
+        }
+    }
+
+    /// Starts draft saves and discards the model asked for, and reports
+    /// finished ones back to it.
+    fn handle_drafts(&mut self, ctx: &egui::Context) {
+        let from = self.model.account.email.clone();
+        if let Some(request) = self.model.save_request.take() {
+            if self.demo {
+                self.apply(Action::DraftFailed(
+                    "The demo mailbox doesn't save drafts.".into(),
+                ));
+            } else {
+                let wake = ctx.clone();
+                drafts::save(
+                    &self.paths,
+                    &from,
+                    request.draft,
+                    request.draft_id,
+                    self.drafts_done.clone(),
+                    move || wake.request_repaint(),
+                );
+            }
+        }
+        if let Some(draft_id) = self.model.discard_request.take()
+            && !self.demo
+        {
+            let wake = ctx.clone();
+            drafts::discard(
+                &self.paths,
+                &from,
+                draft_id,
+                self.drafts_done.clone(),
+                move || wake.request_repaint(),
+            );
+        }
+        let finished: Vec<Finished> = self.drafts.try_iter().collect();
+        for result in finished {
+            match result {
+                Finished::Saved(id) => self.apply(Action::DraftSaved(id)),
+                Finished::Failed(error) => self.apply(Action::DraftFailed(error)),
+                Finished::Discarded => self.model.wants_sync = true,
+            }
+        }
+    }
+
+    fn apply(&mut self, action: Action) {
+        if let Err(error) = self.model.apply(action) {
+            self.model.notice = Some(format!("{error:#}"));
         }
     }
 

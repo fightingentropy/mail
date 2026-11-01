@@ -13,7 +13,10 @@ use serde::{
 };
 
 use super::{ApiLabel, ApiMessage, GmailApi, HistoryPage, IdPage, Outcome, Profile};
-use crate::auth::{self, AccessToken, OAuthClient};
+use crate::{
+    auth::{self, AccessToken, OAuthClient},
+    compose,
+};
 
 const API: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 const MAX_ATTEMPTS: u32 = 8;
@@ -34,6 +37,9 @@ const HISTORY_UNITS: u32 = 2;
 const MODIFY_UNITS: u32 = 10;
 const TRASH_UNITS: u32 = 20;
 const UNTRASH_UNITS: u32 = 10;
+const CREATE_DRAFT_UNITS: u32 = 10;
+const UPDATE_DRAFT_UNITS: u32 = 15;
+const DELETE_DRAFT_UNITS: u32 = 10;
 
 pub struct GmailClient {
     http: ureq::Agent,
@@ -118,6 +124,42 @@ impl GmailClient {
         })
     }
 
+    /// Creates or replaces a draft. Returns the draft's ID.
+    fn put_draft(
+        &self,
+        draft_id: Option<&str>,
+        raw: &[u8],
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<Reply<DraftRef>> {
+        let mut message = serde_json::json!({"raw": compose::raw_for_api(raw)});
+        if let Some(thread_id) = thread_id {
+            message["threadId"] = thread_id.into();
+        }
+        match draft_id {
+            Some(id) => {
+                let path = format!("drafts/{id}");
+                let url = format!("{API}/{path}");
+                let body = serde_json::json!({"id": id, "message": message});
+                self.send(&path, UPDATE_DRAFT_UNITS, |authorization| {
+                    self.http
+                        .put(&url)
+                        .header("Authorization", authorization)
+                        .send_json(&body)
+                })
+            }
+            None => {
+                let url = format!("{API}/drafts");
+                let body = serde_json::json!({"message": message});
+                self.send("drafts", CREATE_DRAFT_UNITS, |authorization| {
+                    self.http
+                        .post(&url)
+                        .header("Authorization", authorization)
+                        .send_json(&body)
+                })
+            }
+        }
+    }
+
     /// Sends one request with pacing, token refresh and retries. `request`
     /// receives the Authorization header value.
     fn send<T: DeserializeOwned>(
@@ -143,11 +185,19 @@ impl GmailClient {
 
             let status = response.status().as_u16();
             if (200..300).contains(&status) {
-                let value = response
+                let text = response
                     .body_mut()
                     .with_config()
                     .limit(64 * 1024 * 1024)
-                    .read_json()
+                    .read_to_string()
+                    .with_context(|| format!("Could not read Gmail's answer for {path}"))?;
+                // A delete answers 204 with no body at all.
+                let text = if text.trim().is_empty() {
+                    "null"
+                } else {
+                    text.as_str()
+                };
+                let value = serde_json::from_str(text)
                     .with_context(|| format!("Unexpected response from Gmail for {path}"))?;
                 return Ok(Reply::Done(value));
             }
@@ -250,6 +300,48 @@ impl GmailApi for GmailClient {
     fn untrash_thread(&self, thread_id: &str) -> anyhow::Result<Outcome> {
         self.post_thread(thread_id, "untrash", None, UNTRASH_UNITS)
     }
+
+    fn create_draft(&self, raw: &[u8], thread_id: Option<&str>) -> anyhow::Result<String> {
+        match self.put_draft(None, raw, thread_id)? {
+            Reply::Done(draft) => Ok(draft.id),
+            Reply::NotFound => bail!("Gmail could not find the thread for this draft"),
+            Reply::Rejected(message) => bail!("Gmail refused the draft: {message}"),
+        }
+    }
+
+    fn update_draft(
+        &self,
+        draft_id: &str,
+        raw: &[u8],
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<Outcome> {
+        Ok(match self.put_draft(Some(draft_id), raw, thread_id)? {
+            Reply::Done(_) => Outcome::Done,
+            Reply::NotFound => Outcome::Gone,
+            Reply::Rejected(message) => Outcome::Rejected(message),
+        })
+    }
+
+    fn delete_draft(&self, draft_id: &str) -> anyhow::Result<Outcome> {
+        let path = format!("drafts/{draft_id}");
+        let url = format!("{API}/{path}");
+        let reply = self.send::<IgnoredAny>(&path, DELETE_DRAFT_UNITS, |authorization| {
+            self.http
+                .delete(&url)
+                .header("Authorization", authorization)
+                .call()
+        })?;
+        Ok(match reply {
+            Reply::Done(_) => Outcome::Done,
+            Reply::NotFound => Outcome::Gone,
+            Reply::Rejected(message) => Outcome::Rejected(message),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct DraftRef {
+    id: String,
 }
 
 /// Spreads requests from all workers evenly over time, so a burst never

@@ -13,6 +13,7 @@ use anyhow::Context;
 use clap::Args;
 use mail_core::{
     auth::{self, OAuthClient, keychain},
+    compose::{self, Draft},
     gmail::{self, GmailApi, GmailClient},
     model::{Account, Label},
     paths::Paths,
@@ -273,6 +274,128 @@ pub fn status(paths: &Paths) -> anyhow::Result<()> {
     let bytes = fs::metadata(&database).map(|meta| meta.len()).unwrap_or(0);
     println!("Database  {} ({})", database.display(), size(bytes as i64));
     Ok(())
+}
+
+#[derive(Args)]
+pub struct DraftArgs {
+    /// Recipients, comma-separated. For a reply, defaults to the sender.
+    #[arg(long)]
+    to: Option<String>,
+    /// Copy recipients, comma-separated.
+    #[arg(long)]
+    cc: Option<String>,
+    /// For a reply, defaults to "Re: " and the original subject.
+    #[arg(long)]
+    subject: Option<String>,
+    /// The text. Read from standard input when left out.
+    #[arg(long)]
+    body: Option<String>,
+    /// Reply to this message or thread ID (from `mail search`), quoting it.
+    #[arg(long, value_name = "ID")]
+    reply: Option<String>,
+    /// With --reply: copy everyone on the original.
+    #[arg(long, requires = "reply")]
+    all: bool,
+}
+
+pub fn draft(paths: &Paths, args: DraftArgs) -> anyhow::Result<()> {
+    let body = match args.body {
+        Some(body) => body,
+        None => std::io::read_to_string(std::io::stdin())
+            .context("Could not read the text from standard input")?,
+    };
+    let store = Store::open_existing(&paths.database())?;
+    let account = signed_in(&store)?;
+    let request = DraftRequest {
+        to: args.to,
+        cc: args.cc,
+        subject: args.subject,
+        body,
+        reply_to: args.reply,
+        reply_all: args.all,
+    };
+    let draft = build_draft(&store, &account, request)?;
+    let draft_id = save_draft(paths, &account, &draft)?;
+    println!(
+        "Saved to Drafts ({draft_id}) for {}. Review and send it from Gmail.",
+        if draft.to.is_empty() {
+            "no recipients yet"
+        } else {
+            &draft.to
+        }
+    );
+    Ok(())
+}
+
+/// What the `draft` command and the agent's `create_draft` tool ask for.
+pub(crate) struct DraftRequest {
+    pub to: Option<String>,
+    pub cc: Option<String>,
+    pub subject: Option<String>,
+    pub body: String,
+    /// A message or thread ID to reply to.
+    pub reply_to: Option<String>,
+    pub reply_all: bool,
+}
+
+/// Turns a request into a draft: a threaded reply with the original quoted
+/// below the text, or a new message.
+pub(crate) fn build_draft(
+    store: &Store,
+    account: &Account,
+    request: DraftRequest,
+) -> anyhow::Result<Draft> {
+    let non_empty = |value: Option<String>| value.filter(|text| !text.trim().is_empty());
+    let Some(id) = request.reply_to else {
+        return Ok(Draft {
+            to: non_empty(request.to).context("Say who the message is to.")?,
+            cc: request.cc.unwrap_or_default(),
+            subject: request.subject.unwrap_or_default(),
+            body: request.body,
+            reply: None,
+        });
+    };
+    let original = match store.message(account.id, &id)? {
+        Some(message) => message,
+        None => store
+            .thread(account.id, &id)?
+            .into_iter()
+            .rev()
+            .find(|message| !message.has_label("DRAFT"))
+            .with_context(|| format!("No message or thread {id} in downloaded mail."))?,
+    };
+    let mut draft = Draft::reply(
+        &original,
+        &account.email,
+        request.reply_all,
+        &dates::human(original.internal_date),
+    );
+    draft.body = format!("{}{}", request.body.trim_end(), draft.body);
+    if let Some(to) = non_empty(request.to) {
+        draft.to = to;
+    }
+    if let Some(cc) = request.cc {
+        draft.cc = cc;
+    }
+    if let Some(subject) = non_empty(request.subject) {
+        draft.subject = subject;
+    }
+    Ok(draft)
+}
+
+/// Saves a draft to Gmail's Drafts. This is the network step; nothing here
+/// sends mail.
+pub(crate) fn save_draft(
+    paths: &Paths,
+    account: &Account,
+    draft: &Draft,
+) -> anyhow::Result<String> {
+    let gmail = GmailClient::new(
+        OAuthClient::load(&paths.oauth_client())?,
+        keychain::load(&account.email)?,
+        None,
+    );
+    compose::save(&gmail, &account.email, draft, None)
 }
 
 pub(crate) fn signed_in(store: &Store) -> anyhow::Result<Account> {

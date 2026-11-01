@@ -1,0 +1,205 @@
+//! The compose panel: a reply or a new message, saved to Gmail's Drafts.
+//! It takes the reader's place while open. Mail does not send; the draft
+//! waits in Drafts on every device until you send it.
+
+use egui::{
+    Margin, RichText, ScrollArea, TextEdit, Vec2,
+    text::{CCursor, CCursorRange},
+};
+use mail_core::{
+    compose::{Draft, ReplyTo},
+    model::Message,
+};
+
+use super::theme;
+use crate::dates;
+
+const READING_WIDTH: f32 = 760.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    To,
+    Body,
+}
+
+pub struct Compose {
+    pub title: &'static str,
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
+    pub body: String,
+    reply: Option<ReplyTo>,
+    /// Gmail's ID once saved, so later saves update the same draft.
+    pub draft_id: Option<String>,
+    /// What the fields held when opened or last saved: anything else is an
+    /// unsaved edit.
+    clean: Draft,
+    /// The draft on its way to Gmail.
+    sending: Option<Draft>,
+    /// Which field takes the cursor when the panel opens; the view takes it.
+    pub focus: Option<Field>,
+}
+
+impl Compose {
+    pub fn new_message() -> Self {
+        Self::from_draft("New message", Draft::default(), Field::To)
+    }
+
+    /// A reply to `message`, or to everyone on it with `all`.
+    pub fn reply(message: &Message, own_address: &str, all: bool) -> Self {
+        let date = dates::human(message.internal_date);
+        let draft = Draft::reply(message, own_address, all, &date);
+        let title = if all { "Reply all" } else { "Reply" };
+        Self::from_draft(title, draft, Field::Body)
+    }
+
+    fn from_draft(title: &'static str, draft: Draft, focus: Field) -> Self {
+        Self {
+            title,
+            to: draft.to.clone(),
+            cc: draft.cc.clone(),
+            subject: draft.subject.clone(),
+            body: draft.body.clone(),
+            reply: draft.reply.clone(),
+            draft_id: None,
+            clean: draft,
+            sending: None,
+            focus: Some(focus),
+        }
+    }
+
+    pub fn draft(&self) -> Draft {
+        Draft {
+            to: self.to.clone(),
+            cc: self.cc.clone(),
+            subject: self.subject.clone(),
+            body: self.body.clone(),
+            reply: self.reply.clone(),
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.draft() != self.clean
+    }
+
+    pub fn is_saving(&self) -> bool {
+        self.sending.is_some()
+    }
+
+    /// Starts a save; returns the draft to send, or `None` if one is already
+    /// on its way.
+    pub fn begin_save(&mut self) -> Option<Draft> {
+        if self.sending.is_some() {
+            return None;
+        }
+        let draft = self.draft();
+        self.sending = Some(draft.clone());
+        Some(draft)
+    }
+
+    pub fn saved(&mut self, draft_id: String) {
+        self.draft_id = Some(draft_id);
+        if let Some(sent) = self.sending.take() {
+            self.clean = sent;
+        }
+    }
+
+    pub fn save_failed(&mut self) {
+        self.sending = None;
+    }
+}
+
+/// Draws the panel. Typing goes straight into the fields; shortcuts are
+/// handled in `keys.rs`.
+pub fn draw(ui: &mut egui::Ui, compose: &mut Compose) {
+    let side = ((ui.available_width() - READING_WIDTH) / 2.0).clamp(36.0, 120.0) as i8;
+    egui::Frame::new()
+        .inner_margin(Margin {
+            left: side,
+            right: side,
+            top: 28,
+            bottom: 20,
+        })
+        .show(ui, |ui| {
+            ui.set_max_width(ui.available_width().min(READING_WIDTH));
+            ui.label(RichText::new(compose.title).font(theme::semibold(22.0)));
+            ui.add_space(14.0);
+
+            let focus = compose.focus.take();
+            let to = field(ui, "To", &mut compose.to);
+            if focus == Some(Field::To) {
+                to.request_focus();
+            }
+            field(ui, "Cc", &mut compose.cc);
+            field(ui, "Subject", &mut compose.subject);
+            ui.add_space(10.0);
+
+            let body_id = ui.id().with("compose-body");
+            let footer_height = 44.0;
+            ScrollArea::vertical()
+                .id_salt("compose-scroll")
+                .max_height((ui.available_height() - footer_height).max(120.0))
+                .show(ui, |ui| {
+                    let body = ui.add(
+                        TextEdit::multiline(&mut compose.body)
+                            .id(body_id)
+                            .font(theme::regular(17.0))
+                            .margin(Vec2::new(14.0, 12.0))
+                            .desired_rows(16)
+                            .desired_width(f32::INFINITY)
+                            .lock_focus(true),
+                    );
+                    if focus == Some(Field::Body) {
+                        body.request_focus();
+                        // Replies start above the quoted message.
+                        if let Some(mut state) = TextEdit::load_state(ui.ctx(), body_id) {
+                            state
+                                .cursor
+                                .set_char_range(Some(CCursorRange::one(CCursor::new(0))));
+                            state.store(ui.ctx(), body_id);
+                        }
+                    }
+                });
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("⌘S save to Drafts    ⌘⇧D discard    Esc close")
+                        .font(theme::regular(13.0))
+                        .color(theme::DIM),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (status, color) = if compose.is_saving() {
+                        ("Saving…", theme::SECONDARY)
+                    } else if compose.is_dirty() {
+                        ("Not saved", theme::DIM)
+                    } else if compose.draft_id.is_some() {
+                        ("Saved in Drafts", theme::ACCENT)
+                    } else {
+                        ("", theme::DIM)
+                    };
+                    ui.label(RichText::new(status).font(theme::medium(13.0)).color(color));
+                });
+            });
+        });
+}
+
+fn field(ui: &mut egui::Ui, label: &str, text: &mut String) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [72.0, 32.0],
+            egui::Label::new(
+                RichText::new(label)
+                    .font(theme::regular(14.5))
+                    .color(theme::DIM),
+            ),
+        );
+        ui.add(
+            TextEdit::singleline(text)
+                .font(theme::regular(15.5))
+                .margin(Vec2::new(10.0, 7.0))
+                .desired_width(f32::INFINITY),
+        )
+    })
+    .inner
+}

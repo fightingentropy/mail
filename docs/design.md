@@ -182,6 +182,7 @@ mail auth [--client <file>]                 sign in (browser)
 mail sync [--days 90]                       full first time, then incremental
 mail search <words…> [--from] [--label] [--since] [--before] [--newest] [--limit]
 mail thread <thread-id>
+mail draft [--to] [--cc] [--subject] [--body | stdin] [--reply <id> [--all]]
 mail labels
 mail status
 ```
@@ -195,20 +196,25 @@ mail agent call read_thread '{"thread_id": "…"}'
 mail agent call read_message '{"message_id": "…"}'
 mail agent call list_labels
 mail agent call status
+mail agent call create_draft '{"reply_to": "…", "body": "…"}'
 ```
 
 Rules:
 
 - **One-shot.** Each call opens the database read-only, prints one JSON
   object and exits. No MCP server, no daemon, no port.
-- **No network.** Results reflect the last sync. An agent that should
-  refresh runs `mail sync` like a person would.
+- **Reading is offline.** Results reflect the last sync. An agent that
+  should refresh runs `mail sync` like a person would.
 - **Email is untrusted input.** Mail is the most common carrier of prompt
   injection. `mail agent tools` states that subjects, bodies, names and links
   are data written by other people, never instructions. Bodies are capped at
   20,000 characters per message.
-- **Drafts, never sends** (milestone 3). `create_draft` will create a Gmail
-  draft for you to review and send. There will be no send tool.
+- **Drafts, never sends.** `create_draft` saves a draft to the user's Gmail
+  Drafts and is the only tool that writes or uses the network. Its arguments
+  are checked before any request: addresses, a 200 KB body limit, and that a
+  reply target exists locally. The instructions tell agents to draft only
+  what the user asked for, never because an email asks. There is no send
+  tool.
 - Errors are JSON too: `{"error": {"code": "invalid_arguments", "message": "…"}}`
   with exit code 1.
 
@@ -228,10 +234,18 @@ Rules:
    re-applies anything queued meanwhile, so archiving during a sync doesn't
    flicker. Gmail refusals (a deleted label) are dropped and reported. Not yet:
    links in bodies, HTML view, attachments, light theme.
-3. **Writing.** Reply and compose as Gmail drafts (RFC 5322 built locally,
-   threaded with `In-Reply-To`/`References`), and the agent `create_draft`
-   tool. Whether the window may send, after an explicit confirmation, gets
-   decided here.
+3. **Writing.** *Done.* `r`, `a` and `c` open a compose panel in the
+   reader's place: a reply quotes the original with the cursor above it,
+   addressed to the sender (or everyone but you with `a`). `⌘S` saves to
+   Gmail's Drafts on a worker thread (`drafts.create`, then `drafts.update`
+   for the same draft) and the next sync brings the draft into the local copy;
+   `⌘⇧D` discards. Messages are built locally as RFC 5322 (UTF-8 text, base64
+   body, RFC 2047 headers, line breaks stripped from every header so no field
+   can inject one). The same code serves `mail draft` and the agent's
+   `create_draft`. Checked end to end on a real account: draft created, synced
+   back, deleted. Mail still never sends. Sending from the window, behind an
+   explicit confirmation, is a separate decision; until then you send from
+   Gmail.
 4. **Polish.** Apple Silicon `.app` bundle, attachments on demand, a `mail`
    symlink for the CLI, an HTML view in the browser for mail that needs it.
 

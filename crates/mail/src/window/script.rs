@@ -2,7 +2,8 @@
 //! handling can be checked without a person at the keyboard.
 //!
 //! Steps are separated by spaces: a key name (`j`, `esc`, `enter`, `down`,
-//! `/`, `#`, `?`) or `text:` followed by characters to type.
+//! `/`, `#`, `?`) or `text:` followed by characters to type, with `_` for a
+//! space.
 
 use std::collections::VecDeque;
 
@@ -14,7 +15,7 @@ pub fn parse(script: &str) -> VecDeque<Vec<Event>> {
 
 fn step(token: &str) -> Vec<Event> {
     if let Some(text) = token.strip_prefix("text:") {
-        return vec![Event::Text(text.to_owned())];
+        return vec![Event::Text(text.replace('_', " "))];
     }
     let named = match token {
         "esc" => Some(Key::Escape),

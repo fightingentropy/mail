@@ -9,6 +9,7 @@ use egui::{
 use mail_core::model::{Message, ThreadSummary};
 
 use super::{
+    compose,
     keys::{Command, Focus, Keys, Press, SHORTCUTS},
     state::{Action, MAILBOXES, Model, View},
     theme,
@@ -93,7 +94,10 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
         .show(ui, |ui| thread_list(ui, model, screen, &mut actions));
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(theme::BACKGROUND))
-        .show(ui, |ui| reader(ui, model, screen, &mut actions));
+        .show(ui, |ui| match &mut model.compose {
+            Some(compose) => compose::draw(ui, compose),
+            None => reader(ui, model, screen, &mut actions),
+        });
 
     if model.picker.is_some() {
         label_picker(ui.ctx(), model, &mut actions);
@@ -121,6 +125,8 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
         Focus::Help
     } else if model.picker.is_some() {
         Focus::Picker
+    } else if model.compose.is_some() {
+        Focus::Compose
     } else if screen.search_focused {
         Focus::Search
     } else {

@@ -8,9 +8,12 @@ use std::{
 };
 
 use mail_core::{
+    compose::Draft,
     model::{Account, Change, Label, LabelKind, Message, ThreadSummary},
     store::{Order, SearchQuery, Store, ThreadFilter},
 };
+
+use super::compose::Compose;
 
 /// How long a selected unread thread stays on screen before it counts as read.
 pub const READ_AFTER: Duration = Duration::from_millis(1500);
@@ -55,6 +58,21 @@ pub enum Action {
     ToggleHelp,
     CloseHelp,
     ToggleExpanded(usize),
+    Reply,
+    ReplyAll,
+    NewMessage,
+    SaveDraft,
+    DiscardDraft,
+    CloseCompose,
+    /// Gmail saved the draft under this ID.
+    DraftSaved(String),
+    DraftFailed(String),
+}
+
+/// A draft for the window to save, with the ID of the draft it replaces.
+pub struct SaveRequest {
+    pub draft: Draft,
+    pub draft_id: Option<String>,
 }
 
 /// The thread in the reader.
@@ -96,6 +114,11 @@ pub struct Model {
     pub notice: Option<String>,
     /// Set after a change, so the window can ask sync to send it.
     pub wants_sync: bool,
+    /// The reply or new message being written, shown instead of the reader.
+    pub compose: Option<Compose>,
+    /// Drafts for the window to save to or delete from Gmail.
+    pub save_request: Option<SaveRequest>,
+    pub discard_request: Option<String>,
     undo: Option<Undo>,
     viewed_since: Option<Instant>,
 }
@@ -117,6 +140,9 @@ impl Model {
             help: false,
             notice: None,
             wants_sync: false,
+            compose: None,
+            save_request: None,
+            discard_request: None,
             undo: None,
             viewed_since: None,
         };
@@ -276,6 +302,55 @@ impl Model {
             Action::PickerToggle(label_id) => self.toggle_label(label_id)?,
             Action::ToggleHelp => self.help = !self.help,
             Action::CloseHelp => self.help = false,
+            Action::Reply | Action::ReplyAll => {
+                let all = action == Action::ReplyAll;
+                match self.reply_target() {
+                    Some(message) => {
+                        self.compose = Some(Compose::reply(message, &self.account.email, all));
+                    }
+                    None => self.notice = Some("Nothing to reply to.".into()),
+                }
+            }
+            Action::NewMessage => self.compose = Some(Compose::new_message()),
+            Action::SaveDraft => {
+                if let Some(compose) = &mut self.compose
+                    && let Some(draft) = compose.begin_save()
+                {
+                    self.save_request = Some(SaveRequest {
+                        draft,
+                        draft_id: compose.draft_id.clone(),
+                    });
+                    self.notice = Some("Saving to Drafts…".into());
+                }
+            }
+            Action::DiscardDraft => {
+                if let Some(compose) = self.compose.take() {
+                    self.discard_request = compose.draft_id;
+                    self.notice = Some("Draft discarded.".into());
+                }
+            }
+            Action::CloseCompose => match &self.compose {
+                Some(compose) if compose.is_dirty() => {
+                    self.notice =
+                        Some("Not saved yet: ⌘S saves it to Drafts, ⌘⇧D discards it.".into());
+                }
+                Some(_) => self.compose = None,
+                None => {}
+            },
+            Action::DraftSaved(draft_id) => {
+                if let Some(compose) = &mut self.compose {
+                    compose.saved(draft_id);
+                }
+                self.notice = Some("Saved to Drafts. Send it from Gmail when ready.".into());
+                // Bring the draft into the local copy.
+                self.wants_sync = true;
+            }
+            Action::DraftFailed(error) => {
+                if let Some(compose) = &mut self.compose {
+                    compose.save_failed();
+                }
+                self.notice = Some(error);
+            }
             Action::ToggleExpanded(index) => {
                 if let Some(expanded) = self
                     .open
@@ -307,6 +382,17 @@ impl Model {
         self.wants_sync = true;
         self.reload()?;
         Ok(None)
+    }
+
+    /// The message a reply answers: the newest one in the open thread that
+    /// isn't itself a draft.
+    fn reply_target(&self) -> Option<&Message> {
+        self.open
+            .as_ref()?
+            .messages
+            .iter()
+            .rev()
+            .find(|message| !message.has_label("DRAFT"))
     }
 
     fn move_selection(&mut self, step: isize) -> anyhow::Result<()> {

@@ -53,6 +53,8 @@ enum Command {
     },
     /// Search downloaded mail. Works offline.
     Search(commands::SearchArgs),
+    /// Save a reply or new message to Gmail's Drafts. Mail never sends.
+    Draft(commands::DraftArgs),
     /// Print a whole conversation.
     Thread {
         /// A thread ID from `mail search`.
@@ -91,6 +93,7 @@ fn main() -> ExitCode {
         Some(Command::Auth { client }) => commands::auth(&paths, client.as_deref()),
         Some(Command::Sync { days }) => commands::sync(&paths, days),
         Some(Command::Search(args)) => commands::search(&paths, &args),
+        Some(Command::Draft(args)) => commands::draft(&paths, args),
         Some(Command::Thread { thread_id }) => commands::thread(&paths, &thread_id),
         Some(Command::Labels) => commands::labels(&paths),
         Some(Command::Status) => commands::status(&paths),

@@ -12,6 +12,7 @@ pub enum Focus {
     Search,
     Picker,
     Help,
+    Compose,
 }
 
 /// One key press or typed character, taken from egui's events.
@@ -46,6 +47,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("s", "Star or unstar"),
     ("l", "Add or remove a label"),
     ("z", "Undo"),
+    ("r  a", "Reply, reply all"),
+    ("c", "New message"),
+    ("⌘S", "Save the draft to Gmail's Drafts"),
+    ("⌘⇧D", "Discard the draft"),
     ("/", "Search"),
     ("Space", "Scroll the conversation"),
     ("g i", "Go to Inbox"),
@@ -68,6 +73,7 @@ impl Keys {
                 Press::Text(text) if text == "?" => Some(Command::Act(Action::ToggleHelp)),
                 _ => None,
             },
+            Focus::Compose => compose_key(press),
             Focus::List => self.list_key(press),
         }
     }
@@ -105,6 +111,9 @@ impl Keys {
                 Key::S => act(Action::ToggleStar),
                 Key::L => act(Action::OpenPicker),
                 Key::Z => act(Action::Undo),
+                Key::R => act(Action::Reply),
+                Key::A => act(Action::ReplyAll),
+                Key::C => act(Action::NewMessage),
                 // Shift+/ is "?", handled as text above.
                 Key::Slash if !modifiers.shift => Some(Command::FocusSearch),
                 Key::Space if modifiers.shift => Some(Command::ScrollReader(-1.0)),
@@ -117,6 +126,19 @@ impl Keys {
                 _ => None,
             },
         }
+    }
+}
+
+/// The compose fields keep typing, including ⌘⌫ and friends; only these
+/// act on the draft. ⌘⇧D is Gmail's own discard shortcut.
+fn compose_key(press: &Press) -> Option<Command> {
+    match press {
+        Press::Key(Key::S, modifiers) if modifiers.command => Some(Command::Act(Action::SaveDraft)),
+        Press::Key(Key::D, modifiers) if modifiers.command && modifiers.shift => {
+            Some(Command::Act(Action::DiscardDraft))
+        }
+        Press::Key(Key::Escape, _) => Some(Command::Act(Action::CloseCompose)),
+        _ => None,
     }
 }
 
@@ -194,6 +216,37 @@ mod tests {
         assert_eq!(
             keys.command(&key(Key::Escape), Focus::Search),
             Some(Command::Act(Action::ClearSearch))
+        );
+    }
+
+    #[test]
+    fn compose_keeps_typing_and_saves_with_command_s() {
+        let mut keys = Keys::default();
+        assert_eq!(keys.command(&key(Key::E), Focus::Compose), None);
+        assert_eq!(keys.command(&key(Key::R), Focus::Compose), None);
+        assert_eq!(
+            keys.command(&Press::Key(Key::S, Modifiers::COMMAND), Focus::Compose),
+            Some(Command::Act(Action::SaveDraft))
+        );
+        // ⌘⌫ deletes text in the field; it must not discard the draft.
+        assert_eq!(
+            keys.command(
+                &Press::Key(Key::Backspace, Modifiers::COMMAND),
+                Focus::Compose
+            ),
+            None
+        );
+        let discard = Modifiers {
+            shift: true,
+            ..Modifiers::COMMAND
+        };
+        assert_eq!(
+            keys.command(&Press::Key(Key::D, discard), Focus::Compose),
+            Some(Command::Act(Action::DiscardDraft))
+        );
+        assert_eq!(
+            keys.command(&key(Key::R), Focus::List),
+            Some(Command::Act(Action::Reply))
         );
     }
 

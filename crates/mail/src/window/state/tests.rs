@@ -194,3 +194,84 @@ fn long_threads_open_with_only_the_latest_and_unread_expanded() {
     model.apply(Action::ToggleExpanded(0)).unwrap();
     assert_eq!(model.open.as_ref().unwrap().expanded, [true, false, true]);
 }
+
+#[test]
+fn reply_opens_a_threaded_draft_to_the_sender() {
+    let (mut model, _folder) = model();
+    model.apply(Action::Reply).unwrap();
+    let compose = model.compose.as_ref().unwrap();
+    assert_eq!(compose.title, "Reply");
+    assert_eq!(compose.to, "Priya Raman <priya@lumen.example>");
+    assert_eq!(
+        compose.subject,
+        "Re: Next steps: senior full-stack engineer"
+    );
+    assert!(compose.body.contains("Priya Raman wrote:\n> Hi,"));
+    assert!(
+        !compose.is_dirty(),
+        "an untouched reply closes without asking"
+    );
+    model.apply(Action::CloseCompose).unwrap();
+    assert!(model.compose.is_none());
+}
+
+#[test]
+fn reply_all_in_a_thread_answers_the_latest_message_without_me() {
+    let (mut model, _folder) = model();
+    model.apply(Action::Next).unwrap();
+    model.apply(Action::ReplyAll).unwrap();
+    let compose = model.compose.as_ref().unwrap();
+    assert_eq!(compose.to, "Sam Okafor <sam@buildkite.test>");
+    assert_eq!(compose.cc, "");
+}
+
+#[test]
+fn unsaved_edits_keep_the_panel_open_until_saved_or_discarded() {
+    let (mut model, _folder) = model();
+    model.apply(Action::NewMessage).unwrap();
+    {
+        let compose = model.compose.as_mut().unwrap();
+        compose.to = "maya@fastmail.test".into();
+        compose.subject = "Friday".into();
+        compose.body = "7:30 works.".into();
+    }
+    model.apply(Action::CloseCompose).unwrap();
+    assert!(model.compose.is_some());
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .unwrap()
+            .starts_with("Not saved yet")
+    );
+
+    model.apply(Action::SaveDraft).unwrap();
+    let request = model.save_request.take().unwrap();
+    assert_eq!(request.draft.to, "maya@fastmail.test");
+    assert_eq!(request.draft_id, None);
+    model.apply(Action::SaveDraft).unwrap();
+    assert!(model.save_request.is_none(), "one save at a time");
+
+    model.apply(Action::DraftSaved("draft-9".into())).unwrap();
+    assert!(model.wants_sync);
+    assert!(!model.compose.as_ref().unwrap().is_dirty());
+
+    // A second save updates the same draft.
+    model
+        .compose
+        .as_mut()
+        .unwrap()
+        .body
+        .push_str(" See you there.");
+    model.apply(Action::SaveDraft).unwrap();
+    assert_eq!(
+        model.save_request.take().unwrap().draft_id.as_deref(),
+        Some("draft-9")
+    );
+    model.apply(Action::DraftFailed("offline".into())).unwrap();
+    assert!(!model.compose.as_ref().unwrap().is_saving());
+
+    model.apply(Action::DiscardDraft).unwrap();
+    assert!(model.compose.is_none());
+    assert_eq!(model.discard_request.as_deref(), Some("draft-9"));
+}
