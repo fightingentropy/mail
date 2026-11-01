@@ -1,0 +1,101 @@
+//! The Gmail REST API: the calls Mail makes and the JSON they return.
+//!
+//! Sync talks to [`GmailApi`] rather than to HTTP directly, so tests run the
+//! real sync logic against an in-memory mailbox. There is deliberately no
+//! method that sends mail.
+
+mod client;
+mod html;
+mod message;
+
+use serde::Deserialize;
+
+pub use client::{GmailClient, http_agent};
+#[cfg(test)]
+pub(crate) use message::split_address;
+pub use message::{ApiMessage, parse_message};
+
+pub trait GmailApi: Sync {
+    fn profile(&self) -> anyhow::Result<Profile>;
+    fn labels(&self) -> anyhow::Result<Vec<ApiLabel>>;
+    /// One page of message IDs matching a Gmail search such as `newer_than:90d`.
+    /// Spam and trash are excluded.
+    fn message_ids(&self, query: &str, page_token: Option<&str>) -> anyhow::Result<IdPage>;
+    /// A full message without attachment contents. `None` if it no longer exists.
+    fn message(&self, id: &str) -> anyhow::Result<Option<ApiMessage>>;
+    /// Changes since `start_history_id`. `None` when Gmail no longer has
+    /// history that old (usually after about a week), which needs a full sync.
+    fn history(
+        &self,
+        start_history_id: &str,
+        page_token: Option<&str>,
+    ) -> anyhow::Result<Option<HistoryPage>>;
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Profile {
+    pub email_address: String,
+    pub history_id: String,
+    #[serde(default)]
+    pub messages_total: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ApiLabel {
+    pub id: String,
+    pub name: String,
+    /// `system` or `user`.
+    #[serde(rename = "type", default)]
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdPage {
+    #[serde(default)]
+    pub messages: Vec<MessageRef>,
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageRef {
+    pub id: String,
+    #[serde(default)]
+    pub thread_id: String,
+    /// Present in history records, absent in search results.
+    #[serde(default)]
+    pub label_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    #[serde(default)]
+    pub history: Vec<HistoryRecord>,
+    pub next_page_token: Option<String>,
+    /// The mailbox's current history ID: the next sync starts here.
+    pub history_id: String,
+}
+
+/// One change to the mailbox. Records arrive oldest first.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryRecord {
+    #[serde(default)]
+    pub messages_added: Vec<HistoryMessage>,
+    #[serde(default)]
+    pub messages_deleted: Vec<HistoryMessage>,
+    #[serde(default)]
+    pub labels_added: Vec<HistoryMessage>,
+    #[serde(default)]
+    pub labels_removed: Vec<HistoryMessage>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct HistoryMessage {
+    /// After a label change, `label_ids` holds the message's complete label
+    /// set, so the newest record for a message is all sync needs.
+    pub message: MessageRef,
+}

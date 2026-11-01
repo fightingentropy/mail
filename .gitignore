@@ -1,0 +1,9 @@
+/target/
+.DS_Store
+.claude/
+.vscode/
+.idea/
+
+# OAuth client files downloaded from Google Cloud. Mail copies the client into
+# its own config folder; never commit one.
+client_secret*.json

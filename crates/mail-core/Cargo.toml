@@ -1,0 +1,30 @@
+[package]
+name = "mail-core"
+description = "Local Gmail store, sync engine and search for Mail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Local mail store. `bundled` builds SQLite with FTS5 enabled.
+rusqlite = { version = "0.40", features = ["bundled"] }
+# Blocking HTTPS for the Gmail REST API and Google's OAuth endpoints.
+ureq = { version = "3", features = ["json"] }
+# Gmail bodies are base64url; PKCE needs SHA-256 and random bytes.
+base64 = "0.22"
+sha2 = "0.10"
+getrandom = "0.3"
+# Decodes text parts that are not UTF-8 (ISO-8859-1, Windows-1252, ...).
+encoding_rs = "0.8"
+# Standard macOS folders for the database and OAuth client.
+directories = "6"
+# Stores the OAuth refresh token in the login Keychain.
+security-framework = "3"
+
+[dev-dependencies]
+tempfile = "3"

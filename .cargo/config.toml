@@ -1,0 +1,6 @@
+# Mail is built for Apple Silicon Macs only.
+[build]
+target = "aarch64-apple-darwin"
+
+[env]
+MACOSX_DEPLOYMENT_TARGET = "13.0"
