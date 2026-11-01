@@ -6,8 +6,11 @@
 mod background;
 mod compose;
 mod demo;
+mod downloads;
 mod drafts;
+mod files;
 mod keys;
+mod links;
 mod script;
 mod state;
 mod theme;
@@ -21,11 +24,12 @@ use std::{
 };
 
 use anyhow::Context;
-use mail_core::{paths::Paths, store::Store, sync::Progress};
+use mail_core::{compose::Draft, paths::Paths, store::Store, sync::Progress};
 
 use background::{Event, Syncer};
+use downloads::Downloader;
 use drafts::Finished;
-use state::{Action, Model};
+use state::{Action, Effect, Model};
 use view::{Screen, SyncStatus};
 
 pub struct Options {
@@ -35,6 +39,8 @@ pub struct Options {
     pub screenshot: Option<PathBuf>,
     /// Keys to press in the demo before the screenshot, such as `j e / text:seat`.
     pub demo_keys: Option<String>,
+    /// Light or dark instead of following macOS, for screenshots of both.
+    pub appearance: Option<egui::Theme>,
 }
 
 pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
@@ -69,11 +75,19 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
     let demo = options.demo;
     let screenshot = options.screenshot;
     let script = script::parse(options.demo_keys.as_deref().unwrap_or_default());
+    let appearance = options.appearance;
     let result = eframe::run_native(
         "Mail",
         native,
         Box::new(move |creation| {
             theme::install(&creation.egui_ctx);
+            if let Some(theme) = appearance {
+                creation.egui_ctx.set_theme(theme);
+            }
+            let downloader = (!demo).then(|| {
+                let ctx = creation.egui_ctx.clone();
+                Downloader::start(paths.clone(), move || ctx.request_repaint())
+            });
             let syncer = (!demo).then(|| {
                 let ctx = creation.egui_ctx.clone();
                 Syncer::start(paths.clone(), move || ctx.request_repaint())
@@ -92,6 +106,7 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
                 demo,
                 drafts,
                 drafts_done,
+                downloader,
                 screenshot: screenshot.map(|path| Screenshot { path, frames: 0 }),
                 script,
                 frames: 0,
@@ -115,6 +130,8 @@ struct Shell {
     /// Results of draft saves and discards running on their own threads.
     drafts: Receiver<Finished>,
     drafts_done: Sender<Finished>,
+    /// `None` in the demo, which has no Gmail to download from.
+    downloader: Option<Downloader>,
     screenshot: Option<Screenshot>,
     /// Scripted key presses for demo screenshots, one step every few frames.
     script: std::collections::VecDeque<Vec<egui::Event>>,
@@ -142,7 +159,8 @@ impl eframe::App for Shell {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive_sync_events();
-        self.handle_drafts(ctx);
+        self.receive_draft_results();
+        self.receive_downloads();
         if let Some(syncer) = &self.syncer
             && (std::mem::take(&mut self.model.wants_sync)
                 || std::mem::take(&mut self.screen.sync_requested))
@@ -164,6 +182,8 @@ impl eframe::App for Shell {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         view::draw(ui, &mut self.model, &mut self.screen);
+        let ctx = ui.ctx().clone();
+        self.carry_out_effects(&ctx);
     }
 
     /// Window size and place persist; egui's own memory does not.
@@ -207,39 +227,8 @@ impl Shell {
         }
     }
 
-    /// Starts draft saves and discards the model asked for, and reports
-    /// finished ones back to it.
-    fn handle_drafts(&mut self, ctx: &egui::Context) {
-        let from = self.model.account.email.clone();
-        if let Some(request) = self.model.save_request.take() {
-            if self.demo {
-                self.apply(Action::DraftFailed(
-                    "The demo mailbox doesn't save drafts.".into(),
-                ));
-            } else {
-                let wake = ctx.clone();
-                drafts::save(
-                    &self.paths,
-                    &from,
-                    request.draft,
-                    request.draft_id,
-                    self.drafts_done.clone(),
-                    move || wake.request_repaint(),
-                );
-            }
-        }
-        if let Some(draft_id) = self.model.discard_request.take()
-            && !self.demo
-        {
-            let wake = ctx.clone();
-            drafts::discard(
-                &self.paths,
-                &from,
-                draft_id,
-                self.drafts_done.clone(),
-                move || wake.request_repaint(),
-            );
-        }
+    /// Reports finished draft saves and discards back to the model.
+    fn receive_draft_results(&mut self) {
         let finished: Vec<Finished> = self.drafts.try_iter().collect();
         for result in finished {
             match result {
@@ -248,6 +237,105 @@ impl Shell {
                 Finished::Discarded => self.model.wants_sync = true,
             }
         }
+    }
+
+    fn receive_downloads(&mut self) {
+        let events: Vec<downloads::Event> = match &self.downloader {
+            Some(downloader) => downloader.events.try_iter().collect(),
+            None => return,
+        };
+        for event in events {
+            self.model.notice = Some(match event {
+                downloads::Event::Saved { path } => {
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    match files::open_download(&path) {
+                        files::Opened::InApp => format!("Saved {name} to Downloads."),
+                        files::Opened::InFinder => format!(
+                            "Saved {name} to Downloads. Shown in Finder, not opened: it could run code."
+                        ),
+                    }
+                }
+                downloads::Event::Failed { filename, error } => {
+                    format!("Could not download {filename}: {error}")
+                }
+            });
+        }
+    }
+
+    /// Opens links, starts downloads, shows HTML and saves or discards
+    /// drafts, as clicks and keys asked the model to.
+    fn carry_out_effects(&mut self, ctx: &egui::Context) {
+        for effect in std::mem::take(&mut self.model.effects) {
+            let notice = match effect {
+                Effect::OpenLink(url) => match files::open_link(&url) {
+                    Ok(()) => None,
+                    Err(error) => Some(format!("{error:#}")),
+                },
+                Effect::Download {
+                    message_id,
+                    attachment,
+                } => match &self.downloader {
+                    Some(downloader) => {
+                        let notice = format!("Downloading {}…", attachment.filename);
+                        downloader.download(message_id, attachment);
+                        Some(notice)
+                    }
+                    None => Some("Downloads aren't available in the demo.".to_owned()),
+                },
+                Effect::SaveDraft { draft, draft_id } => {
+                    self.save_draft(ctx, draft, draft_id);
+                    None
+                }
+                Effect::DiscardDraft(draft_id) => {
+                    self.discard_draft(ctx, draft_id);
+                    None
+                }
+                Effect::OpenHtml { message_id, html } => {
+                    Some(match files::open_html(&message_id, &html) {
+                        Ok(_) => "Opened the HTML version in your browser.".to_owned(),
+                        Err(error) => format!("Could not open the HTML version: {error:#}"),
+                    })
+                }
+            };
+            if notice.is_some() {
+                self.model.notice = notice;
+            }
+        }
+    }
+
+    fn save_draft(&mut self, ctx: &egui::Context, draft: Draft, draft_id: Option<String>) {
+        if self.demo {
+            self.apply(Action::DraftFailed(
+                "The demo mailbox doesn't save drafts.".into(),
+            ));
+            return;
+        }
+        let wake = ctx.clone();
+        drafts::save(
+            &self.paths,
+            &self.model.account.email,
+            draft,
+            draft_id,
+            self.drafts_done.clone(),
+            move || wake.request_repaint(),
+        );
+    }
+
+    fn discard_draft(&mut self, ctx: &egui::Context, draft_id: String) {
+        if self.demo {
+            return;
+        }
+        let wake = ctx.clone();
+        drafts::discard(
+            &self.paths,
+            &self.model.account.email,
+            draft_id,
+            self.drafts_done.clone(),
+            move || wake.request_repaint(),
+        );
     }
 
     fn apply(&mut self, action: Action) {

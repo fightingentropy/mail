@@ -112,6 +112,7 @@ impl Compose {
 /// Draws the panel. Typing goes straight into the fields; shortcuts are
 /// handled in `keys.rs`.
 pub fn draw(ui: &mut egui::Ui, compose: &mut Compose) {
+    let palette = theme::palette(ui.ctx());
     let side = ((ui.available_width() - READING_WIDTH) / 2.0).clamp(36.0, 120.0) as i8;
     egui::Frame::new()
         .inner_margin(Margin {
@@ -126,12 +127,12 @@ pub fn draw(ui: &mut egui::Ui, compose: &mut Compose) {
             ui.add_space(14.0);
 
             let focus = compose.focus.take();
-            let to = field(ui, "To", &mut compose.to);
+            let to = field(ui, "To", &mut compose.to, palette);
             if focus == Some(Field::To) {
                 to.request_focus();
             }
-            field(ui, "Cc", &mut compose.cc);
-            field(ui, "Subject", &mut compose.subject);
+            field(ui, "Cc", &mut compose.cc, palette);
+            field(ui, "Subject", &mut compose.subject, palette);
             ui.add_space(10.0);
 
             let body_id = ui.id().with("compose-body");
@@ -166,17 +167,17 @@ pub fn draw(ui: &mut egui::Ui, compose: &mut Compose) {
                 ui.label(
                     RichText::new("⌘S save to Drafts    ⌘⇧D discard    Esc close")
                         .font(theme::regular(13.0))
-                        .color(theme::DIM),
+                        .color(palette.dim),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (status, color) = if compose.is_saving() {
-                        ("Saving…", theme::SECONDARY)
+                        ("Saving…", palette.secondary)
                     } else if compose.is_dirty() {
-                        ("Not saved", theme::DIM)
+                        ("Not saved", palette.dim)
                     } else if compose.draft_id.is_some() {
-                        ("Saved in Drafts", theme::ACCENT)
+                        ("Saved in Drafts", palette.accent)
                     } else {
-                        ("", theme::DIM)
+                        ("", palette.dim)
                     };
                     ui.label(RichText::new(status).font(theme::medium(13.0)).color(color));
                 });
@@ -184,14 +185,19 @@ pub fn draw(ui: &mut egui::Ui, compose: &mut Compose) {
         });
 }
 
-fn field(ui: &mut egui::Ui, label: &str, text: &mut String) -> egui::Response {
+fn field(
+    ui: &mut egui::Ui,
+    label: &str,
+    text: &mut String,
+    palette: &theme::Palette,
+) -> egui::Response {
     ui.horizontal(|ui| {
         ui.add_sized(
             [72.0, 32.0],
             egui::Label::new(
                 RichText::new(label)
                     .font(theme::regular(14.5))
-                    .color(theme::DIM),
+                    .color(palette.dim),
             ),
         );
         ui.add(

@@ -23,6 +23,8 @@ struct Mail {
     body: &'static str,
     labels: &'static [&'static str],
     attachment: Option<(&'static str, &'static str, i64)>,
+    /// An HTML version, for `h`.
+    html: Option<&'static str>,
 }
 
 const MAILBOX: &[Mail] = &[
@@ -34,15 +36,17 @@ const MAILBOX: &[Mail] = &[
         body: "Hi,\n\nThanks again for the conversation on Thursday. The team enjoyed the systems design discussion, especially the offline sync trade-offs.\n\nWe'd like to invite you to a final round next week: a pairing session in the morning and a chat with our CTO after lunch. Could you share a few times that work between Tuesday and Thursday?\n\nBest,\nPriya",
         labels: &["INBOX", "UNREAD", "IMPORTANT", "Label_work"],
         attachment: None,
+        html: None,
     },
     Mail {
         thread: "t-rail",
         hours_ago: 3,
         from: ("Northline Rail", "tickets@northline.example"),
         subject: "Your e-ticket: London to Edinburgh",
-        body: "Booking reference QX7-41K\n\nSat 15 Nov, depart 08:00, arrive 12:21\nCoach C, seat 42 (window, table)\n\nShow the attached ticket on your phone or print it. Your seat reservation is valid only on this train.",
+        body: "Booking reference QX7-41K\n\nSat 15 Nov, depart 08:00, arrive 12:21\nCoach C, seat 42 (window, table)\n\nShow the attached ticket on your phone or print it. Your seat reservation is valid only on this train.\n\nChange seats or add a railcard at https://northline.example/booking/QX7-41K",
         labels: &["INBOX", "UNREAD", "Label_travel"],
         attachment: Some(("eticket-QX741K.pdf", "application/pdf", 84_000)),
+        html: None,
     },
     Mail {
         thread: "t-review",
@@ -52,6 +56,7 @@ const MAILBOX: &[Mail] = &[
         body: "Looked through the pending-changes queue. The re-apply after sync is a nice touch; it fixes the flicker I saw when archiving during a sync.\n\nOne question: should refused changes surface somewhere, or is dropping them silently enough for v1?",
         labels: &["INBOX", "Label_work"],
         attachment: None,
+        html: None,
     },
     Mail {
         thread: "t-review",
@@ -61,6 +66,7 @@ const MAILBOX: &[Mail] = &[
         body: "Good question. For v1 the status bar reports them after sync, and the next sync shows Gmail's state anyway. I'll add a log view if it turns out to matter.",
         labels: &["SENT"],
         attachment: None,
+        html: None,
     },
     Mail {
         thread: "t-review",
@@ -70,6 +76,7 @@ const MAILBOX: &[Mail] = &[
         body: "Works for me. Approved. Ship it.",
         labels: &["INBOX", "UNREAD", "Label_work"],
         attachment: None,
+        html: None,
     },
     Mail {
         thread: "t-energy",
@@ -79,6 +86,7 @@ const MAILBOX: &[Mail] = &[
         body: "Amount due: £64.18\nDirect debit on 18 Nov.\n\nThis month you used 9% less electricity than last October.",
         labels: &["INBOX", "Label_receipts"],
         attachment: Some(("bill-october.pdf", "application/pdf", 120_000)),
+        html: None,
     },
     Mail {
         thread: "t-dinner",
@@ -88,15 +96,17 @@ const MAILBOX: &[Mail] = &[
         body: "There's a new Georgian place near Borough Market. 7:30? I can book for four if Leo and Ana are around.",
         labels: &["INBOX", "STARRED"],
         attachment: None,
+        html: None,
     },
     Mail {
         thread: "t-newsletter",
         hours_ago: 2 * 24 + 4,
         from: ("Rust Weekly", "editor@rustweekly.example"),
         subject: "This week: async traits, SQLite tips and egui 0.36",
-        body: "Top stories\n\n- Writing a sync engine that survives quota limits\n- SQLite FTS5: trigram or unicode61?\n- What's new in egui 0.36\n\nRead online · Unsubscribe",
+        body: "Top stories\n\n- Writing a sync engine that survives quota limits\n- SQLite FTS5: trigram or unicode61?\n- What's new in egui 0.36\n\nRead online: https://rustweekly.example/issues/212\nUnsubscribe: https://rustweekly.example/unsubscribe",
         labels: &["INBOX", "CATEGORY_UPDATES"],
         attachment: None,
+        html: Some(NEWSLETTER_HTML),
     },
     Mail {
         thread: "t-flat",
@@ -106,6 +116,7 @@ const MAILBOX: &[Mail] = &[
         body: "Hello,\n\nA routine inspection of the flat is booked for Friday 21 November between 10:00 and 12:00. You don't need to be home. Reply if the time doesn't work.\n\nKind regards,\nHollis Lettings",
         labels: &["INBOX"],
         attachment: None,
+        html: None,
     },
     Mail {
         thread: "t-receipt",
@@ -115,6 +126,7 @@ const MAILBOX: &[Mail] = &[
         body: "Thanks for your order.\n\n1 × A5 dot-grid notebook  £14.00\n1 × fineliner set         £9.50\nDelivery                 free\nTotal                    £23.50",
         labels: &["Label_receipts"],
         attachment: None,
+        html: None,
     },
     Mail {
         thread: "t-meetup",
@@ -124,8 +136,22 @@ const MAILBOX: &[Mail] = &[
         body: "Great news, your talk is accepted for the December meetup. 25 minutes plus questions. Slides by the 5th, please.",
         labels: &["INBOX", "STARRED", "Label_work"],
         attachment: None,
+        html: None,
     },
 ];
+
+const NEWSLETTER_HTML: &str = r#"<!DOCTYPE html>
+<html><head><title>Rust Weekly</title></head>
+<body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 40px auto; color: #222">
+<h1 style="font-size: 28px">Rust Weekly</h1>
+<h2 style="font-size: 18px">Top stories</h2>
+<ul>
+<li><a href="https://rustweekly.example/issues/212#sync">Writing a sync engine that survives quota limits</a></li>
+<li><a href="https://rustweekly.example/issues/212#fts5">SQLite FTS5: trigram or unicode61?</a></li>
+<li><a href="https://rustweekly.example/issues/212#egui">What's new in egui 0.36</a></li>
+</ul>
+<p><a href="https://rustweekly.example/unsubscribe">Unsubscribe</a></p>
+</body></html>"#;
 
 /// Fills a new database at `path` with the made-up mailbox.
 pub fn seed(path: &Path) -> anyhow::Result<()> {
@@ -190,6 +216,7 @@ pub fn seed(path: &Path) -> anyhow::Result<()> {
                 .take(120)
                 .collect(),
             body_text: mail.body.into(),
+            body_html: mail.html.map(str::to_owned),
             label_ids: mail.labels.iter().map(|label| (*label).into()).collect(),
             attachments: mail
                 .attachment

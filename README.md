@@ -62,13 +62,26 @@ triage) and nothing runs once you quit.
 | `l` | Add or remove a label |
 | `z` | Undo |
 | `/` | Search, live as you type |
+| Space | Scroll the conversation |
+| `h` | Open the message's HTML version in your browser |
 | `g` then `i` `s` `t` `d` `a` | Inbox, Starred, Sent, Drafts, All mail |
 | `r` / `a` / `c` | Reply, reply all, new message |
 | `⌘S` / `⌘⇧D` | Save the draft to Gmail's Drafts / discard it |
+| `⌘R` | Sync now |
 | `?` | All shortcuts |
 
 Triage applies locally at once and waits in a queue until the next sync sends
-it to Gmail, so it works offline too. Try it without a Google account:
+it to Gmail, so it works offline too.
+
+The reader shows mail as plain text. Web and email links are in blue: hover
+one to see its full address, click to open it. Click an attachment to save
+it to Downloads and open it; anything that could run code (apps, scripts,
+installers, archives) is shown in Finder instead of opened. For mail that
+needs its layout, `h` opens the original HTML in your browser. Scripts are
+blocked there, but remote images load, which tells the sender you opened
+the message. The window follows macOS's light or dark appearance.
+
+Try it without a Google account:
 
 ```bash
 mail --demo
@@ -131,9 +144,10 @@ against an in-memory fake of the Gmail API, so tests never touch a real
 mailbox. Test data and the demo mailbox are made up.
 
 `mail --demo --screenshot out.png` renders the window to a PNG and quits;
-add `--demo-keys "j e / text:seat"` to press keys first. That is how the
-screenshot above is made and how the window's keyboard handling gets checked
-without a person at the keyboard.
+add `--demo-keys "j e / text:seat"` to press keys first (`click:x,y` and
+`hover:x,y` work too, in points), and `--appearance light` or `dark` to pick
+the palette. That is how the screenshot above is made and how the window's
+keyboard handling gets checked without a person at the keyboard.
 
 ## Privacy
 

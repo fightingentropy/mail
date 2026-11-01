@@ -7,12 +7,15 @@ use std::{
 };
 
 use anyhow::{Context, bail};
+use base64::Engine;
 use serde::{
     Deserialize,
     de::{DeserializeOwned, IgnoredAny},
 };
 
-use super::{ApiLabel, ApiMessage, GmailApi, HistoryPage, IdPage, Outcome, Profile};
+use super::{
+    ApiLabel, ApiMessage, GmailApi, HistoryPage, IdPage, Outcome, Profile, message::BASE64URL,
+};
 use crate::{
     auth::{self, AccessToken, OAuthClient},
     compose,
@@ -33,6 +36,7 @@ const PROFILE_UNITS: u32 = 1;
 const LABELS_UNITS: u32 = 1;
 const LIST_UNITS: u32 = 5;
 const MESSAGE_UNITS: u32 = 60;
+const ATTACHMENT_UNITS: u32 = 20;
 const HISTORY_UNITS: u32 = 2;
 const MODIFY_UNITS: u32 = 10;
 const TRASH_UNITS: u32 = 20;
@@ -269,6 +273,32 @@ impl GmailApi for GmailClient {
             &[("format", "full")],
             MESSAGE_UNITS,
         )
+    }
+
+    fn attachment(&self, message_id: &str, attachment_id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        #[derive(Deserialize)]
+        struct Contents {
+            #[serde(default)]
+            data: String,
+        }
+        let path = format!("messages/{message_id}/attachments/{attachment_id}");
+        let url = format!("{API}/{path}");
+        let reply = self.send::<Contents>(&path, ATTACHMENT_UNITS, |authorization| {
+            self.http
+                .get(&url)
+                .header("Authorization", authorization)
+                .call()
+        })?;
+        match reply {
+            Reply::Done(contents) => {
+                let bytes = BASE64URL
+                    .decode(contents.data.trim_end())
+                    .context("Gmail sent an attachment Mail could not decode")?;
+                Ok(Some(bytes))
+            }
+            // An attachment ID Gmail has replaced comes back as 400 or 404.
+            Reply::NotFound | Reply::Rejected(_) => Ok(None),
+        }
     }
 
     fn history(

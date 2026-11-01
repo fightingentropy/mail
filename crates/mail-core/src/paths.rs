@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use directories::ProjectDirs;
+use directories::{ProjectDirs, UserDirs};
 
 #[derive(Clone, Debug)]
 pub struct Paths {
@@ -36,4 +36,11 @@ impl Paths {
     pub fn oauth_client(&self) -> PathBuf {
         self.root.join("oauth-client.json")
     }
+}
+
+/// Your Downloads folder, where opened attachments are saved.
+pub fn downloads() -> anyhow::Result<PathBuf> {
+    UserDirs::new()
+        .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
+        .context("Could not find your Downloads folder")
 }

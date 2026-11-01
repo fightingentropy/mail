@@ -18,8 +18,9 @@ on purpose; the code and its comments carry the details.
   in the background when the app is closed.
 - **Small and readable.** Plain Rust, few dependencies, no framework magic.
 
-Not goals for v1: multiple accounts, non-Gmail providers, HTML rendering,
-calendar or contacts, a hosted service of any kind.
+Not goals for v1: multiple accounts, non-Gmail providers, HTML rendering in
+the window (the browser shows a message's HTML on request), calendar or
+contacts, a hosted service of any kind.
 
 ## Architecture
 
@@ -232,8 +233,10 @@ Rules:
    locally at once and queue in `pending_changes`; sync sends them first
    (`threads.modify`, `threads.trash`, `threads.untrash`), then pulls, then
    re-applies anything queued meanwhile, so archiving during a sync doesn't
-   flicker. Gmail refusals (a deleted label) are dropped and reported. Not yet:
-   links in bodies, HTML view, attachments, light theme.
+   flicker. Gmail refusals (a deleted label) are dropped and reported. Since
+   then: clickable links in bodies (`http`, `https` and `mailto` only, full
+   address on hover, opened only on a click), attachments on demand, the HTML
+   view, and a light palette that follows the macOS appearance.
 3. **Writing.** *Done.* `r`, `a` and `c` open a compose panel in the
    reader's place: a reply quotes the original with the cursor above it,
    addressed to the sender (or everyone but you with `a`). `⌘S` saves to
@@ -246,8 +249,17 @@ Rules:
    back, deleted. Mail still never sends. Sending from the window, behind an
    explicit confirmation, is a separate decision; until then you send from
    Gmail.
-4. **Polish.** Apple Silicon `.app` bundle, attachments on demand, a `mail`
-   symlink for the CLI, an HTML view in the browser for mail that needs it.
+4. **Polish.** Apple Silicon `.app` bundle and a `mail` symlink for the CLI.
+   Done early: *attachments on demand*, fetched with
+   `messages.attachments.get` (20 quota units) on a worker thread and saved
+   to Downloads under a name that never replaces a file. Gmail can retire an
+   attachment ID, so a refused one costs one re-read of the message (60
+   units) for a fresh ID. Documents, images and media open; anything that
+   could run code is shown in Finder. *The HTML view*: `h` writes the
+   message's HTML to a temporary file, with a UTF-8 charset and a policy that
+   blocks scripts, frames and forms, and opens it in the browser. Remote
+   images load there, so the sender learns the message was opened; the
+   reader itself never loads anything.
 
 ## Risks
 

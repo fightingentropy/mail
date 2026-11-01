@@ -9,7 +9,7 @@ use std::{
 
 use mail_core::{
     compose::Draft,
-    model::{Account, Change, Label, LabelKind, Message, ThreadSummary},
+    model::{Account, Attachment, Change, Label, LabelKind, Message, ThreadSummary},
     store::{Order, SearchQuery, Store, ThreadFilter},
 };
 
@@ -67,12 +67,37 @@ pub enum Action {
     /// Gmail saved the draft under this ID.
     DraftSaved(String),
     DraftFailed(String),
+    /// A link clicked in a body.
+    OpenLink(String),
+    /// An attachment chip clicked: the open thread's message and attachment.
+    Download {
+        message: usize,
+        attachment: usize,
+    },
+    /// Shows the newest expanded message's HTML in the browser.
+    OpenHtml,
 }
 
-/// A draft for the window to save, with the ID of the draft it replaces.
-pub struct SaveRequest {
-    pub draft: Draft,
-    pub draft_id: Option<String>,
+/// Work for the window shell that the model can't do itself: open a link,
+/// download an attachment, show HTML in the browser, save or discard a
+/// draft. Each one follows a click or a key press.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Effect {
+    OpenLink(String),
+    Download {
+        message_id: String,
+        attachment: Attachment,
+    },
+    OpenHtml {
+        message_id: String,
+        html: String,
+    },
+    /// Save to Gmail's Drafts, replacing the draft with this ID if there is one.
+    SaveDraft {
+        draft: Draft,
+        draft_id: Option<String>,
+    },
+    DiscardDraft(String),
 }
 
 /// The thread in the reader.
@@ -116,9 +141,8 @@ pub struct Model {
     pub wants_sync: bool,
     /// The reply or new message being written, shown instead of the reader.
     pub compose: Option<Compose>,
-    /// Drafts for the window to save to or delete from Gmail.
-    pub save_request: Option<SaveRequest>,
-    pub discard_request: Option<String>,
+    /// Waiting for the shell, oldest first.
+    pub effects: Vec<Effect>,
     undo: Option<Undo>,
     viewed_since: Option<Instant>,
 }
@@ -141,8 +165,7 @@ impl Model {
             notice: None,
             wants_sync: false,
             compose: None,
-            save_request: None,
-            discard_request: None,
+            effects: Vec::new(),
             undo: None,
             viewed_since: None,
         };
@@ -316,7 +339,7 @@ impl Model {
                 if let Some(compose) = &mut self.compose
                     && let Some(draft) = compose.begin_save()
                 {
-                    self.save_request = Some(SaveRequest {
+                    self.effects.push(Effect::SaveDraft {
                         draft,
                         draft_id: compose.draft_id.clone(),
                     });
@@ -325,7 +348,9 @@ impl Model {
             }
             Action::DiscardDraft => {
                 if let Some(compose) = self.compose.take() {
-                    self.discard_request = compose.draft_id;
+                    if let Some(draft_id) = compose.draft_id {
+                        self.effects.push(Effect::DiscardDraft(draft_id));
+                    }
                     self.notice = Some("Draft discarded.".into());
                 }
             }
@@ -360,6 +385,27 @@ impl Model {
                     *expanded = !*expanded;
                 }
             }
+            Action::OpenLink(url) => self.effects.push(Effect::OpenLink(url)),
+            Action::Download {
+                message,
+                attachment,
+            } => {
+                let found = self
+                    .open
+                    .as_ref()
+                    .and_then(|open| open.messages.get(message))
+                    .and_then(|message| {
+                        let attachment = message.attachments.get(attachment)?.clone();
+                        Some((message.gmail_id.clone(), attachment))
+                    });
+                if let Some((message_id, attachment)) = found {
+                    self.effects.push(Effect::Download {
+                        message_id,
+                        attachment,
+                    });
+                }
+            }
+            Action::OpenHtml => self.open_html(),
         }
         Ok(())
     }
@@ -393,6 +439,28 @@ impl Model {
             .iter()
             .rev()
             .find(|message| !message.has_label("DRAFT"))
+    }
+
+    /// The newest expanded message with an HTML version goes to the browser:
+    /// that is the message on screen, or the one you just expanded.
+    fn open_html(&mut self) {
+        let Some(open) = &self.open else {
+            return;
+        };
+        let newest = open
+            .messages
+            .iter()
+            .zip(&open.expanded)
+            .rev()
+            .filter(|(_, expanded)| **expanded)
+            .find_map(|(message, _)| {
+                let html = message.body_html.as_ref()?;
+                (!html.trim().is_empty()).then(|| (message.gmail_id.clone(), html.clone()))
+            });
+        match newest {
+            Some((message_id, html)) => self.effects.push(Effect::OpenHtml { message_id, html }),
+            None => self.notice = Some("This message has no HTML version.".into()),
+        }
     }
 
     fn move_selection(&mut self, step: isize) -> anyhow::Result<()> {

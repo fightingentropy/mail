@@ -86,16 +86,7 @@ fn sync_once(
     wake: &impl Fn(),
 ) -> anyhow::Result<SyncReport> {
     if connection.is_none() {
-        let store = Store::open(&paths.database())?;
-        let account = store
-            .account()?
-            .context("Not signed in. Run `mail auth`.")?;
-        let gmail = GmailClient::new(
-            OAuthClient::load(&paths.oauth_client())?,
-            keychain::load(&account.email)?,
-            None,
-        );
-        *connection = Some((store, gmail));
+        *connection = Some(connect(paths)?);
     }
     let (store, gmail) = connection.as_mut().expect("connected above");
     // Read the account each time: the sync point moves.
@@ -112,4 +103,18 @@ fn sync_once(
             wake();
         },
     )
+}
+
+/// Opens the database and a Gmail client for the signed-in account.
+pub fn connect(paths: &Paths) -> anyhow::Result<(Store, GmailClient)> {
+    let store = Store::open(&paths.database())?;
+    let account = store
+        .account()?
+        .context("Not signed in. Run `mail auth`.")?;
+    let gmail = GmailClient::new(
+        OAuthClient::load(&paths.oauth_client())?,
+        keychain::load(&account.email)?,
+        None,
+    );
+    Ok((store, gmail))
 }

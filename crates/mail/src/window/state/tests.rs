@@ -246,11 +246,14 @@ fn unsaved_edits_keep_the_panel_open_until_saved_or_discarded() {
     );
 
     model.apply(Action::SaveDraft).unwrap();
-    let request = model.save_request.take().unwrap();
-    assert_eq!(request.draft.to, "maya@fastmail.test");
-    assert_eq!(request.draft_id, None);
+    let [Effect::SaveDraft { draft, draft_id }] = model.effects.as_slice() else {
+        panic!("expected one save, got {:?}", model.effects);
+    };
+    assert_eq!(draft.to, "maya@fastmail.test");
+    assert_eq!(*draft_id, None);
     model.apply(Action::SaveDraft).unwrap();
-    assert!(model.save_request.is_none(), "one save at a time");
+    assert_eq!(model.effects.len(), 1, "one save at a time");
+    model.effects.clear();
 
     model.apply(Action::DraftSaved("draft-9".into())).unwrap();
     assert!(model.wants_sync);
@@ -264,14 +267,92 @@ fn unsaved_edits_keep_the_panel_open_until_saved_or_discarded() {
         .body
         .push_str(" See you there.");
     model.apply(Action::SaveDraft).unwrap();
-    assert_eq!(
-        model.save_request.take().unwrap().draft_id.as_deref(),
-        Some("draft-9")
-    );
+    let [Effect::SaveDraft { draft_id, .. }] = model.effects.as_slice() else {
+        panic!("expected one save, got {:?}", model.effects);
+    };
+    assert_eq!(draft_id.as_deref(), Some("draft-9"));
+    model.effects.clear();
     model.apply(Action::DraftFailed("offline".into())).unwrap();
     assert!(!model.compose.as_ref().unwrap().is_saving());
 
     model.apply(Action::DiscardDraft).unwrap();
     assert!(model.compose.is_none());
-    assert_eq!(model.discard_request.as_deref(), Some("draft-9"));
+    assert_eq!(model.effects, [Effect::DiscardDraft("draft-9".into())]);
+}
+
+fn select(model: &mut Model, subject: &str) {
+    let index = model
+        .threads
+        .iter()
+        .position(|t| t.subject == subject)
+        .unwrap();
+    model.apply(Action::Select(index)).unwrap();
+}
+
+#[test]
+fn clicking_an_attachment_asks_the_shell_to_download_it() {
+    let (mut model, _folder) = model();
+    select(&mut model, "Your e-ticket: London to Edinburgh");
+    model
+        .apply(Action::Download {
+            message: 0,
+            attachment: 0,
+        })
+        .unwrap();
+    let [
+        Effect::Download {
+            message_id,
+            attachment,
+        },
+    ] = model.effects.as_slice()
+    else {
+        panic!("expected one download, got {:?}", model.effects);
+    };
+    assert_eq!(
+        message_id,
+        &model.open.as_ref().unwrap().messages[0].gmail_id
+    );
+    assert_eq!(attachment.filename, "eticket-QX741K.pdf");
+
+    // A stale click, after the thread changed, asks for nothing.
+    model
+        .apply(Action::Download {
+            message: 0,
+            attachment: 5,
+        })
+        .unwrap();
+    assert_eq!(model.effects.len(), 1);
+}
+
+#[test]
+fn links_open_only_through_the_shell() {
+    let (mut model, _folder) = model();
+    let url = "https://northline.example/booking/QX7-41K".to_owned();
+    model.apply(Action::OpenLink(url.clone())).unwrap();
+    assert_eq!(model.effects, [Effect::OpenLink(url)]);
+}
+
+#[test]
+fn h_opens_the_html_of_the_message_on_screen() {
+    let (mut model, _folder) = model();
+    select(
+        &mut model,
+        "This week: async traits, SQLite tips and egui 0.36",
+    );
+    model.apply(Action::OpenHtml).unwrap();
+    let [Effect::OpenHtml { html, .. }] = model.effects.as_slice() else {
+        panic!("expected HTML, got {:?}", model.effects);
+    };
+    assert!(html.contains("<h1"));
+}
+
+#[test]
+fn plain_text_mail_says_it_has_no_html() {
+    let (mut model, _folder) = model();
+    model.apply(Action::OpenHtml).unwrap();
+    assert!(model.effects.is_empty());
+    assert_eq!(
+        model.notice.as_deref(),
+        Some("This message has no HTML version.")
+    );
 }
