@@ -25,6 +25,9 @@ pub trait GmailApi: Sync {
     fn message_ids(&self, query: &str, page_token: Option<&str>) -> anyhow::Result<IdPage>;
     /// A full message without attachment contents. `None` if it no longer exists.
     fn message(&self, id: &str) -> anyhow::Result<Option<ApiMessage>>;
+    /// A message's headers, snippet and labels without its body, at a third
+    /// of the quota cost. `None` if it no longer exists.
+    fn message_headers(&self, id: &str) -> anyhow::Result<Option<ApiMessage>>;
     /// Just a message's current labels, at a third of the quota cost of the
     /// full message. `None` if it no longer exists.
     fn message_labels(&self, id: &str) -> anyhow::Result<Option<Vec<String>>>;

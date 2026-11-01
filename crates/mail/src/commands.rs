@@ -84,25 +84,47 @@ pub fn sync(paths: &Paths, days: u32) -> anyhow::Result<()> {
         ..SyncOptions::default()
     };
     let mut downloading_since: Option<Instant> = None;
-    let report = sync::sync(&mut store, &gmail, &account, &options, &mut |progress| {
-        if show_progress {
-            let line = match progress {
-                Progress::Listing { found } => format!("Listing messages… {found}"),
-                Progress::Checking { done, total } => {
-                    format!("Checking labels {done} of {total}")
-                }
-                Progress::Downloading { done, total } => {
-                    let since = *downloading_since.get_or_insert_with(Instant::now);
-                    format!(
-                        "Downloading {done} of {total}{}",
-                        time_left(since, done, total)
-                    )
-                }
-            };
-            eprint!("\r\x1b[2K{line}");
-            let _ = std::io::stderr().flush();
+    let mut filling_since: Option<Instant> = None;
+    let mut show = |progress: Progress| {
+        if !show_progress {
+            return;
         }
-    })?;
+        let line = match progress {
+            Progress::Listing { found } => format!("Listing messages… {found}"),
+            Progress::Checking { done, total } => format!("Checking labels {done} of {total}"),
+            Progress::Downloading { done, total } => {
+                let since = *downloading_since.get_or_insert_with(Instant::now);
+                format!(
+                    "Downloading {done} of {total}{}",
+                    time_left(since, done, total)
+                )
+            }
+            Progress::Filling { done, total } => {
+                let since = *filling_since.get_or_insert_with(Instant::now);
+                format!(
+                    "Filling in message bodies {done} of {total}{}",
+                    time_left(since, done, total)
+                )
+            }
+        };
+        eprint!("\r\x1b[2K{line}");
+        let _ = std::io::stderr().flush();
+    };
+
+    let report = sync::sync(&mut store, &gmail, &account, &options, &mut show)?;
+    // A big first sync stores headers first; keep going until every body is
+    // here. Each round is short, and Ctrl-C leaves the rest for next time.
+    let mut filled = report.bodies_filled;
+    let mut pending = report.bodies_pending;
+    while pending > 0 {
+        let account = signed_in(&store)?;
+        let next = sync::sync(&mut store, &gmail, &account, &options, &mut show)?;
+        filled += next.bodies_filled;
+        pending = next.bodies_pending;
+        if next.bodies_filled == 0 {
+            break;
+        }
+    }
     if show_progress {
         eprint!("\r\x1b[2K");
     }
@@ -121,6 +143,12 @@ pub fn sync(paths: &Paths, days: u32) -> anyhow::Result<()> {
             "Up to date in {seconds:.1}s: {} new, {} relabeled, {} removed.",
             report.downloaded, report.relabeled, report.deleted
         ),
+    }
+    if filled > 0 {
+        println!("Filled in {filled} message bodies.");
+    }
+    if pending > 0 {
+        println!("{pending} message bodies are still to come; run `mail sync` again.");
     }
     Ok(())
 }

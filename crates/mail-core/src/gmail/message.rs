@@ -127,6 +127,7 @@ pub fn parse_message(api: ApiMessage) -> Message {
         snippet: html::tidy(&html::decode_entities(&api.snippet)),
         body_text,
         has_html: found.html.is_some(),
+        body_pending: false,
         body_html: found.html,
         message_id_header: header("Message-ID"),
         in_reply_to: header("In-Reply-To"),

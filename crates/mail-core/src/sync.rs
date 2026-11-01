@@ -34,6 +34,13 @@ pub struct SyncOptions {
     /// quota (about 1.6 full messages a second); a few workers keep that pace
     /// despite network latency, and more help if the quota is raised.
     pub workers: usize,
+    /// A full pass with more new messages than this stores headers first
+    /// (20 quota units each), so the mailbox is usable three times sooner;
+    /// bodies (60 units each) follow. Below it, one pass is quicker overall.
+    pub headers_first_above: usize,
+    /// Bodies filled in per sync, newest first. Keeps each sync short, so new
+    /// mail and triage aren't held up behind a long backfill.
+    pub bodies_per_sync: usize,
 }
 
 impl Default for SyncOptions {
@@ -41,6 +48,8 @@ impl Default for SyncOptions {
         Self {
             days: 90,
             workers: 3,
+            headers_first_above: 300,
+            bodies_per_sync: 200,
         }
     }
 }
@@ -61,6 +70,10 @@ pub struct SyncReport {
     pub pushed: usize,
     /// Local changes Gmail refused for good and that were dropped.
     pub rejected: usize,
+    /// Bodies of headers-only messages filled in by this sync.
+    pub bodies_filled: usize,
+    /// Headers-only messages still waiting for their bodies.
+    pub bodies_pending: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +83,11 @@ pub enum Progress {
         found: usize,
     },
     Downloading {
+        done: usize,
+        total: usize,
+    },
+    /// Filling in bodies of messages stored from headers only.
+    Filling {
         done: usize,
         total: usize,
     },
@@ -100,11 +118,14 @@ pub fn sync(
         Some(report) => report,
         None => full(store, api, account, options, progress)?,
     };
+    let (filled, still_pending) = fill_bodies(store, api, account, options, progress)?;
     // Changes made in the window while this sync ran are not in Gmail's
     // view yet; keep showing them.
     store.reapply_pending(account.id)?;
     report.pushed = pushed;
     report.rejected = rejected;
+    report.bodies_filled = filled;
+    report.bodies_pending = still_pending;
     Ok(report)
 }
 
@@ -172,7 +193,12 @@ fn full(
     let known = store.message_ids(account.id)?;
     let (stored, fresh): (Vec<String>, Vec<String>) =
         listed.iter().cloned().partition(|id| known.contains(id));
-    let downloaded = download(store, api, account, fresh, options, progress)?;
+    let depth = if fresh.len() > options.headers_first_above {
+        Depth::Headers
+    } else {
+        Depth::Full
+    };
+    let downloaded = download(store, api, account, fresh, depth, options, progress)?;
     let relabeled = match account.history_id {
         Some(_) => refresh_labels(store, api, account, stored, options, progress)?,
         None => 0,
@@ -198,6 +224,8 @@ fn full(
         deleted,
         pushed: 0,
         rejected: 0,
+        bodies_filled: 0,
+        bodies_pending: 0,
     })
 }
 
@@ -249,6 +277,7 @@ fn incremental(
         api,
         account,
         added.into_iter().collect(),
+        Depth::Full,
         options,
         progress,
     )?;
@@ -268,6 +297,8 @@ fn incremental(
         deleted,
         pushed: 0,
         rejected: 0,
+        bodies_filled: 0,
+        bodies_pending: 0,
     }))
 }
 
@@ -291,11 +322,21 @@ fn save_labels(store: &mut Store, api: &dyn GmailApi, account: &Account) -> anyh
 /// Downloads messages on worker threads and stores them in batches on this
 /// one. Parsing happens on the workers too. Returns how many were stored;
 /// messages deleted before they could be fetched are skipped.
+/// How much of each message to download.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Depth {
+    /// The whole message (60 quota units).
+    Full,
+    /// Headers, snippet and labels (20 units), stored with `body_pending`.
+    Headers,
+}
+
 fn download(
     store: &mut Store,
     api: &dyn GmailApi,
     account: &Account,
     ids: Vec<String>,
+    depth: Depth,
     options: &SyncOptions,
     progress: &mut dyn FnMut(Progress),
 ) -> anyhow::Result<usize> {
@@ -310,9 +351,19 @@ fn download(
         ids,
         options.workers,
         &|id| {
-            api.message(id)
+            let found = match depth {
+                Depth::Full => api.message(id),
+                Depth::Headers => api.message_headers(id),
+            };
+            found
                 .with_context(|| format!("Could not download message {id}"))
-                .map(|found| found.map(parse_message))
+                .map(|found| {
+                    found.map(|api_message| {
+                        let mut message = parse_message(api_message);
+                        message.body_pending = depth == Depth::Headers;
+                        message
+                    })
+                })
         },
         &mut |found| {
             done += 1;
@@ -333,6 +384,48 @@ fn download(
     store.save_messages(account.id, &batch)?;
     stored += batch.len();
     fetched.map(|()| stored)
+}
+
+/// Downloads the bodies of up to `bodies_per_sync` headers-only messages,
+/// newest first. Returns how many were filled and how many still wait.
+fn fill_bodies(
+    store: &mut Store,
+    api: &dyn GmailApi,
+    account: &Account,
+    options: &SyncOptions,
+    progress: &mut dyn FnMut(Progress),
+) -> anyhow::Result<(usize, usize)> {
+    let ids = store.pending_bodies(account.id, options.bodies_per_sync)?;
+    if ids.is_empty() {
+        return Ok((0, 0));
+    }
+    let filled = download(
+        store,
+        api,
+        account,
+        ids.clone(),
+        Depth::Full,
+        options,
+        &mut |step| {
+            progress(match step {
+                Progress::Downloading { done, total } => Progress::Filling { done, total },
+                other => other,
+            })
+        },
+    )?;
+    // Every fetch succeeded, so a message still waiting is one Gmail no
+    // longer has.
+    let pending: HashSet<String> = store
+        .pending_bodies(account.id, usize::MAX)?
+        .into_iter()
+        .collect();
+    let gone: Vec<&str> = ids
+        .iter()
+        .filter(|id| pending.contains(*id))
+        .map(String::as_str)
+        .collect();
+    store.delete_messages(account.id, gone)?;
+    Ok((filled, store.pending_body_count(account.id)?))
 }
 
 /// Reads the current labels of messages Mail already has and stores them.

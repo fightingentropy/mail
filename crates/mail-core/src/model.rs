@@ -128,6 +128,9 @@ pub struct Message {
     /// store leave it empty and set `has_html`; `Store::message_html` loads it.
     pub body_html: Option<String>,
     pub has_html: bool,
+    /// Stored from headers only during a big first sync; the body follows
+    /// in a later pass.
+    pub body_pending: bool,
     /// RFC 5322 threading headers, needed to write replies.
     pub message_id_header: Option<String>,
     pub in_reply_to: Option<String>,

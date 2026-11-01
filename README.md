@@ -36,11 +36,16 @@ cargo install --locked --path crates/mail
 To get the window as an app in `/Applications`, with its own icon:
 
 ```bash
-packaging/macos/build-app.sh --install --open
+packaging/macos/build-app.sh --install --link-cli --open
 ```
 
-It is signed for your Mac only, not notarized. It sits beside Apple's Mail,
-which stays where it is in `/System/Applications`.
+The script signs with your Developer ID if you have one (hardened runtime,
+secure timestamp), else ad hoc. A stable signature means macOS remembers
+"Always Allow" for Mail's Keychain item across rebuilds. `--link-cli` makes
+the terminal `mail` the app's own binary, so both share that one approval.
+`--notarize <profile>` notarizes and staples the app with a
+`xcrun notarytool store-credentials` profile. The app sits beside Apple's
+Mail, which stays where it is in `/System/Applications`.
 
 Then connect your Gmail. This uses your own Google Cloud OAuth client; the
 [setup guide](docs/google-setup.md) takes about ten minutes.
@@ -125,9 +130,10 @@ mail (CLI, agent CLI, window)  →  mail-core: auth · gmail · sync · store
 - **Gmail API with OAuth.** PKCE and a loopback redirect, with the refresh
   token in the macOS Keychain. Mail never sees your password.
 - **Sync.** The first run downloads the last 90 days, paced to Gmail's quota
-  (about 100 messages a minute, so a few minutes for a typical mailbox).
-  After that, Gmail's History API supplies exact changes in a fraction of a
-  second.
+  (about 100 full messages a minute). Past 300 messages it stores headers
+  first, three times faster, so the mailbox is usable sooner, then fills in
+  bodies newest first. After that, Gmail's History API supplies exact
+  changes in a fraction of a second.
 - **Store.** One SQLite file in WAL mode. Messages, labels and attachment
   metadata are stored; HTML is kept compressed in its own table and
   attachments download only when opened.

@@ -56,8 +56,13 @@ fn run(paths: Paths, requests: Receiver<Request>, events: Sender<Event>, wake: i
     let mut connection: Option<(Store, GmailClient)> = None;
     loop {
         let result = sync_once(&paths, &mut connection, &events, &wake);
+        // While a big first sync still owes bodies, go again straight away.
+        let mut more_to_fill = false;
         let event = match result {
-            Ok(report) => Event::Synced(report),
+            Ok(report) => {
+                more_to_fill = report.bodies_pending > 0 && report.bodies_filled > 0;
+                Event::Synced(report)
+            }
             Err(error) => {
                 // Start fresh next time: the token or database may have changed.
                 connection = None;
@@ -69,7 +74,8 @@ fn run(paths: Paths, requests: Receiver<Request>, events: Sender<Event>, wake: i
         }
         wake();
 
-        match requests.recv_timeout(EVERY) {
+        let wait = if more_to_fill { Duration::ZERO } else { EVERY };
+        match requests.recv_timeout(wait) {
             Ok(Request::SyncNow) | Err(RecvTimeoutError::Timeout) => {
                 // Several triage actions in a row need only one sync.
                 while requests.try_recv().is_ok() {}

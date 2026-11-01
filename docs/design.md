@@ -117,7 +117,7 @@ are numbered and tracked with `PRAGMA user_version`
 |---|---|
 | `accounts` | Email address, the Gmail `history_id` reached by the last full or incremental sync, last sync time |
 | `labels` | Gmail label ID, name, system or user |
-| `messages` | One row per Gmail message: thread ID, received time (ms), subject, sender, To/Cc, snippet, plain text body, threading headers |
+| `messages` | One row per Gmail message: thread ID, received time (ms), subject, sender, To/Cc, snippet, plain text body, threading headers, whether the body is still to come |
 | `message_bodies` | Each message's HTML version, deflate-compressed, read only when opened in the browser |
 | `message_labels` | Message ↔ label ID. Gmail labels are per message; a thread shows the union |
 | `attachments` | Filename, type, size, Gmail attachment ID. Contents are fetched only when opened |
@@ -154,6 +154,16 @@ Choices:
   batches of 200 per transaction. The history ID is saved only at the end, so
   an interrupted or failed first sync keeps what it stored, resumes and skips
   what it already has.
+- **Headers first for big mailboxes:** with more than 300 new messages, the
+  first pass fetches `format=metadata` (headers, snippet, labels; 20 units)
+  and stores each message with `body_pending`. The sync point is saved, so the
+  mailbox is browsable and searchable by subject and sender at a third of the
+  time. Every sync then fills in up to 200 bodies, newest first; the window
+  goes again at once while bodies are owed, and `mail sync` loops until they
+  are all in. It costs a third more quota in total, so smaller first syncs
+  download everything in one pass. A body Gmail no longer has is dropped.
+  Measured on my 452 messages: headers all stored after about 95 s (instead
+  of 285 s for a full pass), every body in after 381 s.
 - **Later syncs:** replay `users.history.list` from the saved history ID:
   download added messages, set labels from the newest label record, delete
   removed messages. When little has changed this takes a few requests.
@@ -270,10 +280,14 @@ Rules:
    CLI and `mail draft` stop at Drafts, and a test checks that no agent tool
    is a send.
 4. **Polish.** *App bundle done:* `packaging/macos/build-app.sh` builds an
-   Apple Silicon `Mail.app` (bundle ID `org.erlin.mail`, ad-hoc signed),
-   installs it in `/Applications` and refuses to replace any other app of that
-   name. The icon is drawn in code (`examples/render_icon.rs`). Still to do:
-   notarized releases and a `mail` symlink for the CLI.
+   Apple Silicon `Mail.app` (bundle ID `org.erlin.mail`), installs it in
+   `/Applications` and refuses to replace any other app of that name. It
+   signs with a Developer ID when the keychain has one (hardened runtime,
+   secure timestamp), so the Keychain remembers its approval across
+   rebuilds; `--link-cli` points `~/.cargo/bin/mail` at the app's binary so
+   the terminal shares that identity; `--notarize <profile>` submits,
+   staples and checks the app with Gatekeeper. The icon is drawn in code
+   (`examples/render_icon.rs`). Still to do: a GitHub release workflow.
    Done early: *attachments on demand*, fetched with
    `messages.attachments.get` (20 quota units) on a worker thread and saved
    to Downloads under a name that never replaces a file. Gmail can retire an
@@ -314,7 +328,6 @@ from 285 s to 95 s (451 label checks, nothing downloaded again).
   app password, behind the same store.
 - More than a week offline means a full pass: labels for every stored
   message plus anything new, about a minute and a half for my mailbox.
-- A full sync is bounded by Gmail's quota at about 100 messages a minute:
-  minutes for a personal mailbox, hours for a very busy one. A first pass of
-  headers only (`format=metadata`, 20 units) would make a big mailbox usable
-  sooner, with bodies filling in after.
+- A full sync is bounded by Gmail's quota at about 100 full messages a
+  minute. Headers first makes a big mailbox usable at about 300 messages a
+  minute, but bodies still take hours for a very busy one.

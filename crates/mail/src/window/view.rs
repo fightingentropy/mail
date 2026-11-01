@@ -708,6 +708,14 @@ fn expanded_message(
     if let Some(url) = body(ui, body_text) {
         actions.push(Action::OpenLink(url));
     }
+    if message.body_pending {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("The full message is still downloading.")
+                .font(theme::regular(13.5))
+                .color(theme::palette(ui.ctx()).dim),
+        );
+    }
 
     if !message.attachments.is_empty() {
         ui.add_space(14.0);

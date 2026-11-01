@@ -127,6 +127,13 @@ pub(super) const MIGRATIONS: &[&str] = &[
         SELECT id, body_html FROM messages WHERE trim(coalesce(body_html, '')) != '';
     ALTER TABLE messages DROP COLUMN body_html;
     "#,
+    // 4. A big first sync stores headers first; bodies fill in afterwards,
+    // newest first.
+    r#"
+    ALTER TABLE messages ADD COLUMN body_pending INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX messages_pending ON messages (account_id, internal_date DESC)
+        WHERE body_pending = 1;
+    "#,
 ];
 
 pub(super) const LATEST: i64 = MIGRATIONS.len() as i64;

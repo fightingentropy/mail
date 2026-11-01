@@ -1,24 +1,44 @@
 #!/bin/bash
-# Builds Mail.app for Apple Silicon and, with --install, puts it in
-# /Applications. --open launches it afterwards.
+# Builds Mail.app for Apple Silicon.
 #
-#   packaging/macos/build-app.sh [--install] [--open]
+#   packaging/macos/build-app.sh [--install] [--link-cli] [--open] [--notarize PROFILE]
 #
-# The app is ad-hoc signed for this Mac and not notarized. Set
-# CODESIGN_IDENTITY to sign with a Developer ID instead.
+#   --install            put the app in /Applications
+#   --link-cli           make ~/.cargo/bin/mail the app's own binary, so the
+#                        terminal and the window share one signed identity
+#   --open               launch it afterwards
+#   --notarize PROFILE   notarize and staple with a `xcrun notarytool
+#                        store-credentials` profile (needs a Developer ID)
+#
+# Signing uses CODESIGN_IDENTITY, else the first "Developer ID Application"
+# identity in the keychain, else an ad-hoc signature. A stable identity lets
+# macOS remember "Always Allow" for Mail's Keychain item across rebuilds; an
+# ad-hoc signature changes with every build, so macOS asks again.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 install=false
+link_cli=false
 open_after=false
-for argument in "$@"; do
-    case "$argument" in
+notary_profile=""
+while [ $# -gt 0 ]; do
+    case "$1" in
         --install) install=true ;;
+        --link-cli) link_cli=true ;;
         --open) open_after=true ;;
-        *) echo "usage: $0 [--install] [--open]" >&2; exit 2 ;;
+        --notarize) notary_profile="${2:?--notarize needs a notarytool profile name}"; shift ;;
+        *) echo "usage: $0 [--install] [--link-cli] [--open] [--notarize PROFILE]" >&2; exit 2 ;;
     esac
+    shift
 done
+
+identity="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)}"
+if [ -n "$notary_profile" ] && [ -z "$identity" ]; then
+    echo "Notarizing needs a Developer ID Application identity." >&2
+    exit 1
+fi
 
 cd "$root"
 cargo build --release --locked -p mail
@@ -46,8 +66,23 @@ iconutil -c icns "$iconset" -o "$app/Contents/Resources/Mail.icns"
 
 # codesign rejects Finder metadata inherited from the checkout.
 xattr -cr "$app"
-codesign --force --sign "${CODESIGN_IDENTITY:--}" "$app"
+if [ -n "$identity" ]; then
+    # Hardened runtime and a secure timestamp: what notarization requires.
+    codesign --force --timestamp --options runtime --sign "$identity" "$app"
+    echo "Signed with $identity"
+else
+    codesign --force --sign - "$app"
+    echo "Signed ad hoc (no Developer ID found)"
+fi
 codesign --verify --strict "$app"
+
+if [ -n "$notary_profile" ]; then
+    archive="$(mktemp -d)/Mail.zip"
+    ditto -c -k --keepParent "$app" "$archive"
+    xcrun notarytool submit "$archive" --keychain-profile "$notary_profile" --wait
+    xcrun stapler staple "$app"
+    spctl --assess --type execute --verbose "$app"
+fi
 echo "Built $app ($version)"
 
 target="$app"
@@ -69,6 +104,11 @@ if $install; then
     fi
     ditto "$app" "$target"
     echo "Installed $target"
+fi
+if $link_cli; then
+    mkdir -p "$HOME/.cargo/bin"
+    ln -sf "$(cd "$(dirname "$target")" && pwd)/Mail.app/Contents/MacOS/mail" "$HOME/.cargo/bin/mail"
+    echo "Linked ~/.cargo/bin/mail to the app"
 fi
 if $open_after; then
     open "$target"

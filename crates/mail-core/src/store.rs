@@ -230,8 +230,9 @@ impl Store {
                 "INSERT INTO messages (
                     account_id, gmail_id, thread_id, internal_date, subject, from_name,
                     from_addr, to_addrs, cc_addrs, snippet, body_text,
-                    message_id_header, in_reply_to, references_header, size_estimate
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                    message_id_header, in_reply_to, references_header, size_estimate,
+                    body_pending
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                  ON CONFLICT (account_id, gmail_id) DO UPDATE SET
                     thread_id = excluded.thread_id,
                     internal_date = excluded.internal_date,
@@ -245,7 +246,8 @@ impl Store {
                     message_id_header = excluded.message_id_header,
                     in_reply_to = excluded.in_reply_to,
                     references_header = excluded.references_header,
-                    size_estimate = excluded.size_estimate
+                    size_estimate = excluded.size_estimate,
+                    body_pending = excluded.body_pending
                  RETURNING id",
             )?;
             let mut clear_labels =
@@ -277,6 +279,7 @@ impl Store {
                         message.in_reply_to,
                         message.references,
                         message.size_estimate,
+                        message.body_pending,
                     ],
                     |row| row.get(0),
                 )?;
@@ -364,6 +367,27 @@ impl Store {
         Ok(ids)
     }
 
+    /// Gmail IDs of messages stored from headers only, newest first.
+    pub fn pending_bodies(&self, account_id: i64, limit: usize) -> anyhow::Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT gmail_id FROM messages WHERE account_id = ?1 AND body_pending = 1
+             ORDER BY internal_date DESC LIMIT ?2",
+        )?;
+        let ids = statement
+            .query_map(params![account_id, limit as i64], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
+    pub fn pending_body_count(&self, account_id: i64) -> anyhow::Result<usize> {
+        let count: i64 = self.connection.query_row(
+            "SELECT count(*) FROM messages WHERE account_id = ?1 AND body_pending = 1",
+            [account_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     pub fn message(&self, account_id: i64, gmail_id: &str) -> anyhow::Result<Option<Message>> {
         let found = self
             .connection
@@ -443,7 +467,7 @@ impl Store {
 const SELECT_MESSAGE: &str = "SELECT id, gmail_id, thread_id, internal_date, subject, from_name,
     from_addr, to_addrs, cc_addrs, snippet, body_text,
     EXISTS (SELECT 1 FROM message_bodies b WHERE b.message_id = messages.id), message_id_header,
-    in_reply_to, references_header, size_estimate FROM messages";
+    in_reply_to, references_header, size_estimate, body_pending FROM messages";
 
 fn message_from_row(row: &Row) -> rusqlite::Result<(i64, Message)> {
     let message = Message {
@@ -464,6 +488,7 @@ fn message_from_row(row: &Row) -> rusqlite::Result<(i64, Message)> {
         in_reply_to: row.get(13)?,
         references: row.get(14)?,
         size_estimate: row.get(15)?,
+        body_pending: row.get(16)?,
         label_ids: Vec::new(),
         attachments: Vec::new(),
     };

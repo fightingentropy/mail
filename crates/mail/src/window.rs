@@ -203,6 +203,14 @@ impl Shell {
                 Event::Progress(Progress::Listing { found }) => {
                     self.screen.status = SyncStatus::Working(format!("Listing messages… {found}"));
                 }
+                Event::Progress(Progress::Filling { done, total }) => {
+                    self.screen.status = SyncStatus::Working(format!(
+                        "Downloading message bodies {done} of {total}"
+                    ));
+                    if done.is_multiple_of(50) {
+                        self.reload();
+                    }
+                }
                 Event::Progress(Progress::Checking { done, total }) => {
                     self.screen.status =
                         SyncStatus::Working(format!("Checking labels {done} of {total}"));
@@ -216,7 +224,14 @@ impl Shell {
                     }
                 }
                 Event::Synced(report) => {
-                    self.screen.status = SyncStatus::Idle;
+                    self.screen.status = if report.bodies_pending > 0 {
+                        SyncStatus::Working(format!(
+                            "{} message bodies still downloading",
+                            report.bodies_pending
+                        ))
+                    } else {
+                        SyncStatus::Idle
+                    };
                     if report.rejected > 0 {
                         self.model.notice = Some(format!(
                             "Gmail refused {} change{}; showing Gmail's version.",

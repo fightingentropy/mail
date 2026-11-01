@@ -37,6 +37,7 @@ const LABELS_UNITS: u32 = 1;
 const LIST_UNITS: u32 = 5;
 const MESSAGE_UNITS: u32 = 60;
 const MINIMAL_MESSAGE_UNITS: u32 = 20;
+const METADATA_MESSAGE_UNITS: u32 = 20;
 const ATTACHMENT_UNITS: u32 = 20;
 const HISTORY_UNITS: u32 = 2;
 const MODIFY_UNITS: u32 = 10;
@@ -301,6 +302,21 @@ impl GmailApi for GmailClient {
             // An attachment ID Gmail has replaced comes back as 400 or 404.
             Reply::NotFound | Reply::Rejected(_) => Ok(None),
         }
+    }
+
+    fn message_headers(&self, id: &str) -> anyhow::Result<Option<ApiMessage>> {
+        // Only the headers Mail stores; Gmail sends all of them otherwise.
+        let query = [
+            ("format", "metadata"),
+            ("metadataHeaders", "From"),
+            ("metadataHeaders", "To"),
+            ("metadataHeaders", "Cc"),
+            ("metadataHeaders", "Subject"),
+            ("metadataHeaders", "Message-ID"),
+            ("metadataHeaders", "In-Reply-To"),
+            ("metadataHeaders", "References"),
+        ];
+        self.get(&format!("messages/{id}"), &query, METADATA_MESSAGE_UNITS)
     }
 
     fn message_labels(&self, id: &str) -> anyhow::Result<Option<Vec<String>>> {

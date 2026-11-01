@@ -38,6 +38,7 @@ struct State {
     drafts_created: usize,
     /// Label-only reads, as opposed to full downloads in `fetches`.
     label_fetches: usize,
+    header_fetches: usize,
 }
 
 impl FakeGmail {
@@ -55,6 +56,7 @@ impl FakeGmail {
                 drafts: BTreeMap::new(),
                 drafts_created: 0,
                 label_fetches: 0,
+                header_fetches: 0,
             }),
         }
     }
@@ -96,6 +98,15 @@ impl FakeGmail {
 
     fn label_fetches(&self) -> usize {
         self.state.lock().unwrap().label_fetches
+    }
+
+    fn header_fetches(&self) -> usize {
+        self.state.lock().unwrap().header_fetches
+    }
+
+    /// Removes a message without a history record, as if Gmail purged it.
+    fn vanish(&self, id: &str) {
+        self.state.lock().unwrap().messages.remove(id);
     }
 
     pub(crate) fn add_attachment(&self, attachment_id: &str, contents: &[u8]) {
@@ -251,6 +262,19 @@ impl GmailApi for FakeGmail {
             return Ok(None);
         }
         Ok(state.attachments.get(attachment_id).cloned())
+    }
+
+    fn message_headers(&self, id: &str) -> anyhow::Result<Option<ApiMessage>> {
+        let mut state = self.state.lock().unwrap();
+        state.header_fetches += 1;
+        Ok(state.messages.get(id).cloned().map(|mut message| {
+            // Headers only: Gmail's metadata format has no body or parts.
+            if let Some(payload) = &mut message.payload {
+                payload.body = None;
+                payload.parts.clear();
+            }
+            message
+        }))
     }
 
     fn message_labels(&self, id: &str) -> anyhow::Result<Option<Vec<String>>> {
@@ -418,6 +442,7 @@ fn run(store: &mut Store, gmail: &FakeGmail) -> SyncReport {
     let options = SyncOptions {
         days: 90,
         workers: 3,
+        ..SyncOptions::default()
     };
     sync(store, gmail, &account, &options, &mut |_| {}).unwrap()
 }
@@ -456,6 +481,8 @@ fn first_sync_downloads_the_window_and_records_where_it_stopped() {
             deleted: 0,
             pushed: 0,
             rejected: 0,
+            bodies_filled: 0,
+            bodies_pending: 0,
         }
     );
     let account = store.account().unwrap().unwrap();
@@ -495,6 +522,8 @@ fn later_syncs_replay_history() {
             deleted: 1,
             pushed: 0,
             rejected: 0,
+            bodies_filled: 0,
+            bodies_pending: 0,
         }
     );
     assert_eq!(
@@ -575,6 +604,7 @@ fn a_failed_first_sync_keeps_what_it_downloaded() {
     let options = SyncOptions {
         days: 90,
         workers: 1,
+        ..SyncOptions::default()
     };
     assert!(sync(&mut store, &gmail, &account, &options, &mut |_| {}).is_err());
     assert_eq!(store.stats(account.id).unwrap().messages, 4);
@@ -714,4 +744,79 @@ fn changes_made_during_a_sync_survive_it() {
     assert_eq!(replayed.relabeled, 1);
     store.reapply_pending(account.id).unwrap();
     assert_eq!(labels(&store, "a"), ["STARRED", "UNREAD"]);
+}
+
+fn headers_first() -> SyncOptions {
+    SyncOptions {
+        days: 90,
+        workers: 2,
+        headers_first_above: 2,
+        bodies_per_sync: 3,
+    }
+}
+
+fn body_of(store: &Store, id: &str) -> (bool, String) {
+    let account = store.account().unwrap().unwrap();
+    let message = store.message(account.id, id).unwrap().unwrap();
+    (message.body_pending, message.body_text)
+}
+
+#[test]
+fn a_big_first_sync_stores_headers_first_then_fills_bodies_newest_first() {
+    let gmail = mailbox();
+    let mut store = Store::in_memory();
+    let account = store.add_account("me@example.com").unwrap();
+    let report = sync(&mut store, &gmail, &account, &headers_first(), &mut |_| {}).unwrap();
+
+    // Five headers at 20 units each, then the three newest bodies.
+    assert_eq!(gmail.header_fetches(), 5);
+    assert_eq!(gmail.fetches(), 3);
+    assert_eq!(
+        (
+            report.downloaded,
+            report.bodies_filled,
+            report.bodies_pending
+        ),
+        (5, 3, 2)
+    );
+    assert!(
+        store.account().unwrap().unwrap().history_id.is_some(),
+        "usable before bodies arrive"
+    );
+    assert_eq!(body_of(&store, "c"), (false, "LHR to LIS, seat 14C".into()));
+    assert_eq!(body_of(&store, "d"), (true, String::new()));
+    // Subjects and senders are searchable at once; bodies once they arrive.
+    assert_eq!(search(&store, "digest"), ["d"]);
+    assert!(search(&store, "stories").is_empty());
+
+    let account = store.account().unwrap().unwrap();
+    let report = sync(&mut store, &gmail, &account, &headers_first(), &mut |_| {}).unwrap();
+    assert_eq!(report.kind, SyncKind::Incremental);
+    assert_eq!((report.bodies_filled, report.bodies_pending), (2, 0));
+    assert_eq!(search(&store, "stories"), ["d"]);
+    assert_eq!(labels(&store, "e"), ["Label_1"]);
+}
+
+#[test]
+fn a_small_first_sync_downloads_everything_in_one_pass() {
+    let gmail = mailbox();
+    let mut store = Store::in_memory();
+    run(&mut store, &gmail);
+    assert_eq!(gmail.header_fetches(), 0);
+    assert_eq!(gmail.fetches(), 5);
+}
+
+#[test]
+fn a_body_gmail_no_longer_has_is_dropped() {
+    let gmail = mailbox();
+    let mut store = Store::in_memory();
+    let account = store.add_account("me@example.com").unwrap();
+    sync(&mut store, &gmail, &account, &headers_first(), &mut |_| {}).unwrap();
+
+    gmail.vanish("d");
+    let account = store.account().unwrap().unwrap();
+    let report = sync(&mut store, &gmail, &account, &headers_first(), &mut |_| {}).unwrap();
+    assert_eq!((report.bodies_filled, report.bodies_pending), (1, 0));
+    assert!(store.message(account.id, "d").unwrap().is_none());
+    assert_eq!(body_of(&store, "e"), (false, "Archived long ago".into()));
 }
