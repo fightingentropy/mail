@@ -17,6 +17,8 @@ use super::compose::Compose;
 
 /// How long a selected unread thread stays on screen before it counts as read.
 pub const READ_AFTER: Duration = Duration::from_millis(1500);
+/// How long a status-bar notice stays before it clears itself.
+pub const NOTICE_FOR: Duration = Duration::from_secs(5);
 
 /// The mailboxes in the sidebar, in order, before the user's labels.
 pub const MAILBOXES: &[(&str, &str)] = &[
@@ -154,8 +156,9 @@ pub struct Model {
     pub open: Option<OpenThread>,
     pub picker: Option<Picker>,
     pub help: bool,
-    /// One line for the status bar, such as "Archived. Press z to undo."
-    pub notice: Option<String>,
+    /// One line for the status bar, such as "Archived. Press z to undo.",
+    /// and when it was set. See [`Model::notify`].
+    notice: Option<(String, Instant)>,
     /// The Undo shortcut for that line; the window keeps it current.
     pub undo_key: String,
     /// Set after a change, so the window can ask sync to send it.
@@ -275,7 +278,7 @@ impl Model {
                 if in_inbox {
                     self.triage(Change::archive(), "Archived")?;
                 } else {
-                    self.notice = Some("Not in the inbox.".into());
+                    self.notify("Not in the inbox.".into());
                 }
             }
             Action::Trash => self.triage(Change::Trash, "Moved to Trash")?,
@@ -358,7 +361,7 @@ impl Model {
                     Some(message) => {
                         self.compose = Some(Compose::reply(message, &self.account.email, all));
                     }
-                    None => self.notice = Some("Nothing to reply to.".into()),
+                    None => self.notify("Nothing to reply to.".into()),
                 }
             }
             Action::NewMessage => self.compose = Some(Compose::new_message()),
@@ -370,7 +373,7 @@ impl Model {
                         draft,
                         draft_id: compose.draft_id.clone(),
                     });
-                    self.notice = Some("Saving to Drafts…".into());
+                    self.notify("Saving to Drafts…".into());
                 }
             }
             Action::DiscardDraft => {
@@ -378,12 +381,12 @@ impl Model {
                     if let Some(draft_id) = compose.draft_id {
                         self.effects.push(Effect::DiscardDraft(draft_id));
                     }
-                    self.notice = Some("Draft discarded.".into());
+                    self.notify("Draft discarded.".into());
                 }
             }
             Action::CloseCompose => match &self.compose {
                 Some(compose) if compose.is_dirty() => {
-                    self.notice = Some("Not saved yet: save it to Drafts or discard it.".into());
+                    self.notify("Not saved yet: save it to Drafts or discard it.".into());
                 }
                 Some(_) => self.compose = None,
                 None => {}
@@ -398,7 +401,7 @@ impl Model {
                     }
                     compose.saved(draft_id);
                 }
-                self.notice = Some("Saved to Drafts.".into());
+                self.notify("Saved to Drafts.".into());
                 // Bring the draft into the local copy.
                 self.wants_sync = true;
             }
@@ -412,26 +415,26 @@ impl Model {
                         draft,
                         draft_id: compose.draft_id.clone(),
                     });
-                    self.notice = Some("Sending…".into());
+                    self.notify("Sending…".into());
                 }
             }
             Action::CancelSend => self.confirm_send = None,
             Action::MessageSent => {
                 self.compose = None;
-                self.notice = Some("Sent.".into());
+                self.notify("Sent.".into());
                 self.wants_sync = true;
             }
             Action::SendFailed(error) => {
                 if let Some(compose) = &mut self.compose {
                     compose.send_failed();
                 }
-                self.notice = Some(error);
+                self.notify(error);
             }
             Action::DraftFailed(error) => {
                 if let Some(compose) = &mut self.compose {
                     compose.save_failed();
                 }
-                self.notice = Some(error);
+                self.notify(error);
             }
             Action::ToggleExpanded(index) => {
                 if let Some(expanded) = self
@@ -469,7 +472,39 @@ impl Model {
 
     /// Marks the selected thread read once it has been on screen for
     /// [`READ_AFTER`]. Returns how long to wait before checking again.
+    /// The status bar's notice, if one is showing.
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_ref().map(|(text, _)| text.as_str())
+    }
+
+    /// Shows a notice in the status bar. It clears itself after
+    /// [`NOTICE_FOR`], unless it reports work still going ("Sending…"),
+    /// which stays until the result replaces it.
+    pub fn notify(&mut self, text: String) {
+        self.notice = Some((text, Instant::now()));
+    }
+
+    /// Clears an old notice and marks the open thread read once it has been
+    /// on screen long enough. Returns how long until the next of those.
     pub fn tick(&mut self, now: Instant) -> anyhow::Result<Option<Duration>> {
+        let waits = [self.expire_notice(now), self.mark_read_when_due(now)?];
+        Ok(waits.into_iter().flatten().min())
+    }
+
+    fn expire_notice(&mut self, now: Instant) -> Option<Duration> {
+        let (text, since) = self.notice.as_ref()?;
+        if text.ends_with('…') {
+            return None;
+        }
+        let shown = now.saturating_duration_since(*since);
+        if shown < NOTICE_FOR {
+            return Some(NOTICE_FOR - shown);
+        }
+        self.notice = None;
+        None
+    }
+
+    fn mark_read_when_due(&mut self, now: Instant) -> anyhow::Result<Option<Duration>> {
         let unread = self.selected_thread().is_some_and(|thread| thread.unread);
         let Some(since) = self.viewed_since.filter(|_| unread) else {
             return Ok(None);
@@ -497,17 +532,17 @@ impl Model {
             return;
         }
         if compose.is_saving() {
-            self.notice = Some("Wait for the draft to finish saving.".into());
+            self.notify("Wait for the draft to finish saving.".into());
             return;
         }
         let draft = compose.draft();
         if !draft.has_recipients() {
-            self.notice = Some("Add a recipient first.".into());
+            self.notify("Add a recipient first.".into());
             return;
         }
         let invalid = draft.invalid_addresses();
         if !invalid.is_empty() {
-            self.notice = Some(format!("Not an email address: {}", invalid.join(", ")));
+            self.notify(format!("Not an email address: {}", invalid.join(", ")));
             return;
         }
         self.confirm_send = Some(SendSummary {
@@ -548,7 +583,7 @@ impl Model {
         };
         match newest.zip(html) {
             Some((message_id, html)) => self.effects.push(Effect::OpenHtml { message_id, html }),
-            None => self.notice = Some("This message has no HTML version.".into()),
+            None => self.notify("This message has no HTML version.".into()),
         }
         Ok(())
     }
@@ -582,7 +617,7 @@ impl Model {
         });
         self.store
             .apply_change(self.account.id, &thread_id, &change)?;
-        self.notice = Some(match self.undo_key.as_str() {
+        self.notify(match self.undo_key.as_str() {
             "" => format!("{done}."),
             key => format!("{done}. Press {key} to undo."),
         });
@@ -608,7 +643,7 @@ impl Model {
 
     fn undo(&mut self) -> anyhow::Result<()> {
         let Some(undo) = self.undo.take() else {
-            self.notice = Some("Nothing to undo.".into());
+            self.notify("Nothing to undo.".into());
             return Ok(());
         };
         let account = self.account.id;
@@ -628,7 +663,7 @@ impl Model {
             self.store
                 .apply_change(account, &undo.thread_id, &Change::Labels { add, remove })?;
         }
-        self.notice = Some("Undone.".into());
+        self.notify("Undone.".into());
         self.wants_sync = true;
         self.reload()?;
         if let Some(index) = self

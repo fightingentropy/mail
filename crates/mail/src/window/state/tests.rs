@@ -66,7 +66,7 @@ fn archive_moves_to_the_next_thread_and_undo_brings_it_back() {
         "Next steps: senior full-stack engineer"
     );
     assert_eq!(model.pending_changes(), 2);
-    assert_eq!(model.notice.as_deref(), Some("Undone."));
+    assert_eq!(model.notice(), Some("Undone."));
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn archive_outside_the_inbox_says_so() {
         .unwrap();
     model.apply(Action::Select(receipt)).unwrap();
     model.apply(Action::Archive).unwrap();
-    assert_eq!(model.notice.as_deref(), Some("Not in the inbox."));
+    assert_eq!(model.notice(), Some("Not in the inbox."));
     assert_eq!(model.pending_changes(), 0);
 }
 
@@ -147,10 +147,7 @@ fn label_picker_filters_and_toggles() {
             .label_ids
             .contains(&"Label_travel".to_string())
     );
-    assert_eq!(
-        model.notice.as_deref(),
-        Some("Labeled Travel. Press z to undo.")
-    );
+    assert_eq!(model.notice(), Some("Labeled Travel. Press z to undo."));
 
     model.apply(Action::OpenPicker).unwrap();
     model
@@ -180,6 +177,28 @@ fn a_thread_counts_as_read_after_being_shown() {
         .unwrap();
     assert!(!model.selected_thread().unwrap().unread);
     assert!(model.wants_sync);
+}
+
+#[test]
+fn notices_clear_themselves_but_work_in_progress_stays() {
+    let (mut model, _folder) = model();
+    model.apply(Action::Archive).unwrap();
+    let set = Instant::now();
+    assert!(model.notice().unwrap().starts_with("Archived"));
+    let wait = model.tick(set).unwrap().expect("waits to clear the notice");
+    assert!(wait <= NOTICE_FOR);
+
+    model
+        .tick(set + NOTICE_FOR + Duration::from_millis(50))
+        .unwrap();
+    assert_eq!(model.notice(), None);
+    // Undo still works once the notice has gone.
+    model.apply(Action::Undo).unwrap();
+    assert_eq!(model.threads.len(), 8);
+
+    model.notify("Sending…".into());
+    model.tick(Instant::now() + NOTICE_FOR * 3).unwrap();
+    assert_eq!(model.notice(), Some("Sending…"));
 }
 
 #[test]
@@ -237,13 +256,7 @@ fn unsaved_edits_keep_the_panel_open_until_saved_or_discarded() {
     }
     model.apply(Action::CloseCompose).unwrap();
     assert!(model.compose.is_some());
-    assert!(
-        model
-            .notice
-            .as_deref()
-            .unwrap()
-            .starts_with("Not saved yet")
-    );
+    assert!(model.notice().unwrap().starts_with("Not saved yet"));
 
     model.apply(Action::SaveDraft).unwrap();
     let [Effect::SaveDraft { draft, draft_id }] = model.effects.as_slice() else {
@@ -351,10 +364,7 @@ fn plain_text_mail_says_it_has_no_html() {
     let (mut model, _folder) = model();
     model.apply(Action::OpenHtml).unwrap();
     assert!(model.effects.is_empty());
-    assert_eq!(
-        model.notice.as_deref(),
-        Some("This message has no HTML version.")
-    );
+    assert_eq!(model.notice(), Some("This message has no HTML version."));
 }
 
 #[test]
@@ -413,10 +423,10 @@ fn confirming_sends_once_and_closes_on_success() {
 
     // The save half reports the draft ID without changing the notice.
     model.apply(Action::DraftSaved("draft-3".into())).unwrap();
-    assert_eq!(model.notice.as_deref(), Some("Sending…"));
+    assert_eq!(model.notice(), Some("Sending…"));
     model.apply(Action::MessageSent).unwrap();
     assert!(model.compose.is_none());
-    assert_eq!(model.notice.as_deref(), Some("Sent."));
+    assert_eq!(model.notice(), Some("Sent."));
     assert!(model.wants_sync);
 }
 
@@ -450,16 +460,10 @@ fn sending_needs_a_valid_recipient() {
     compose_to(&mut model, "");
     model.apply(Action::RequestSend).unwrap();
     assert!(model.confirm_send.is_none());
-    assert_eq!(model.notice.as_deref(), Some("Add a recipient first."));
+    assert_eq!(model.notice(), Some("Add a recipient first."));
 
     model.compose.as_mut().unwrap().to = "maya@".into();
     model.apply(Action::RequestSend).unwrap();
     assert!(model.confirm_send.is_none());
-    assert!(
-        model
-            .notice
-            .as_deref()
-            .unwrap()
-            .starts_with("Not an email address")
-    );
+    assert!(model.notice().unwrap().starts_with("Not an email address"));
 }

@@ -172,7 +172,7 @@ impl eframe::App for Shell {
         match self.model.tick(Instant::now()) {
             Ok(Some(wait)) => ctx.request_repaint_after(wait),
             Ok(None) => {}
-            Err(error) => self.model.notice = Some(format!("{error:#}")),
+            Err(error) => self.model.notify(format!("{error:#}")),
         }
         if let Some(screenshot) = &mut self.screenshot
             && self.script.is_empty()
@@ -234,7 +234,7 @@ impl Shell {
                         SyncStatus::Idle
                     };
                     if report.rejected > 0 {
-                        self.model.notice = Some(format!(
+                        self.model.notify(format!(
                             "Gmail refused {} change{}; showing Gmail's version.",
                             report.rejected,
                             if report.rejected == 1 { "" } else { "s" }
@@ -267,7 +267,7 @@ impl Shell {
             None => return,
         };
         for event in events {
-            self.model.notice = Some(match event {
+            self.model.notify(match event {
                 downloads::Event::Saved { path } => {
                     let name = path
                         .file_name()
@@ -326,8 +326,8 @@ impl Shell {
                     })
                 }
             };
-            if notice.is_some() {
-                self.model.notice = notice;
+            if let Some(notice) = notice {
+                self.model.notify(notice);
             }
         }
     }
@@ -382,13 +382,13 @@ impl Shell {
 
     fn apply(&mut self, action: Action) {
         if let Err(error) = self.model.apply(action) {
-            self.model.notice = Some(format!("{error:#}"));
+            self.model.notify(format!("{error:#}"));
         }
     }
 
     fn reload(&mut self) {
         if let Err(error) = self.model.reload() {
-            self.model.notice = Some(format!("{error:#}"));
+            self.model.notify(format!("{error:#}"));
         }
     }
 }

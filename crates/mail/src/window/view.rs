@@ -132,7 +132,7 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
     for action in actions {
         let clears_search = action == Action::ClearSearch;
         if let Err(error) = model.apply(action) {
-            model.notice = Some(format!("{error:#}"));
+            model.notify(format!("{error:#}"));
         }
         if clears_search {
             screen.search_text.clear();
@@ -1012,7 +1012,7 @@ fn status_bar(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &m
             egui::Label::new(RichText::new(text).font(theme::regular(13.0)).color(color))
                 .truncate(),
         );
-        if let Some(notice) = &model.notice {
+        if let Some(notice) = model.notice() {
             ui.add_space(24.0);
             ui.label(
                 RichText::new(notice)
