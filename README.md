@@ -108,7 +108,8 @@ The same menu narrows the window to one account. Triage, replies and
 attachments always go through the account a conversation belongs to, and a
 new message comes from the account shown (the first one when all are).
 
-The sidebar shows each account's Google profile photo. Accounts signed in
+The sidebar shows your first name, taken from the mail you send, and each
+account's Google profile photo. Accounts signed in
 before Mail asked to see it show their initial until you sign in to them
 again: **Add account…** and pick the same account. To use a different
 picture, choose **Choose photo…** in the same menu (or run `mail photo

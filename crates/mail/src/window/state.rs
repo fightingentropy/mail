@@ -174,6 +174,8 @@ pub struct Model {
     labels: HashMap<i64, Vec<Label>>,
     /// Unread threads per label, for each account.
     unread: HashMap<i64, HashMap<String, usize>>,
+    /// The name each account signs its mail with, once one is stored.
+    names: HashMap<i64, String>,
     pub view: View,
     /// The mailbox to return to when a search is cleared.
     mailbox: String,
@@ -209,6 +211,7 @@ impl Model {
             scope: None,
             labels: HashMap::new(),
             unread: HashMap::new(),
+            names: HashMap::new(),
             view: View::Mailbox("INBOX".into()),
             mailbox: "INBOX".into(),
             threads: Vec::new(),
@@ -258,6 +261,15 @@ impl Model {
         self.scope
             .and_then(|id| self.account(id))
             .or(self.accounts.first())
+    }
+
+    /// The first name an account signs its mail with, such as "Erlin".
+    pub fn first_name(&self, account_id: i64) -> Option<&str> {
+        let name = self.names.get(&account_id)?;
+        // A bare address as the name says nothing new.
+        name.split_whitespace()
+            .next()
+            .filter(|word| !word.contains('@'))
     }
 
     /// The accounts the list shows: the chosen one, or all of them.
@@ -327,6 +339,12 @@ impl Model {
                 .insert(account.id, self.store.labels(account.id)?);
             self.unread
                 .insert(account.id, self.store.unread_counts(account.id)?);
+            // A name rarely changes; look until the first sent mail arrives.
+            if !self.names.contains_key(&account.id)
+                && let Some(name) = self.store.own_name(account)?
+            {
+                self.names.insert(account.id, name);
+            }
         }
         let previous = self
             .selected_thread()

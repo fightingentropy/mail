@@ -581,3 +581,12 @@ fn new_mail_comes_from_the_account_shown() {
     model.apply(Action::NewMessage).unwrap();
     assert_eq!(model.compose.take().unwrap().from, demo::WORK_ADDRESS);
 }
+
+#[test]
+fn the_header_uses_the_first_name_you_sign_with() {
+    let (model, _folder) = two_accounts();
+    let first = model.accounts[0].id;
+    assert_eq!(model.first_name(first), Some("Alex"));
+    // No mail sent from the second account yet.
+    assert_eq!(model.first_name(model.accounts[1].id), None);
+}

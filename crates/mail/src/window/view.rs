@@ -9,7 +9,7 @@ use egui::{
 use std::{collections::HashMap, ops::Range, path::PathBuf};
 
 use mail_core::{
-    model::{Attachment, LabelKind, Message, ThreadSummary},
+    model::{Account, Attachment, LabelKind, Message, ThreadSummary},
     paths::Paths,
 };
 
@@ -325,8 +325,8 @@ fn sidebar(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut 
     });
 }
 
-/// Your photo, "Mail", and the account shown: an address, or "All" when
-/// several accounts are. Clicking the account opens a menu of them.
+/// Your photo and first name, and the account shown: an address, or "All"
+/// when several accounts are. Clicking the account opens a menu of them.
 fn account_header(
     ui: &mut egui::Ui,
     model: &Model,
@@ -336,7 +336,13 @@ fn account_header(
     let palette = theme::palette(ui.ctx());
     let several = model.accounts.len() > 1;
     let shown = model.scope.and_then(|id| model.account(id));
-    let photo_of = model.header_account().map(|account| account.email.clone());
+    let header_face = model.header_account().map(|account| face(model, account));
+    // Your first name, from the mail you send; "Mail" until there is some.
+    let title = model
+        .header_account()
+        .and_then(|account| model.first_name(account.id))
+        .unwrap_or("Mail")
+        .to_owned();
     let name = match shown {
         Some(account) => account.email.clone(),
         None if several => "All".to_owned(),
@@ -351,13 +357,13 @@ fn account_header(
     ui.horizontal(|ui| {
         let size = 38.0;
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-        if let Some(email) = &photo_of {
-            paint_avatar(ui, screen, email, rect);
+        if let Some(header_face) = &header_face {
+            paint_avatar(ui, screen, header_face, rect);
         }
         ui.vertical(|ui| {
             ui.add_space(1.0);
             ui.label(
-                RichText::new("Mail")
+                RichText::new(title)
                     .font(theme::semibold(19.0))
                     .color(palette.text),
             );
@@ -407,10 +413,10 @@ fn account_button(ui: &mut egui::Ui, name: &str) -> egui::Response {
 fn account_menu(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut Vec<Action>) {
     let mut chosen = None;
     if model.accounts.len() > 1 {
-        let emails: Vec<&str> = model
+        let faces: Vec<Face> = model
             .accounts
             .iter()
-            .map(|account| account.email.as_str())
+            .map(|account| face(model, account))
             .collect();
         let count: usize = model
             .accounts
@@ -420,7 +426,7 @@ fn account_menu(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: 
         if account_row(
             ui,
             screen,
-            &emails,
+            &faces,
             "All accounts",
             count,
             model.scope.is_none(),
@@ -434,7 +440,7 @@ fn account_menu(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: 
         if account_row(
             ui,
             screen,
-            &[&account.email],
+            &[face(model, account)],
             &account.email,
             count,
             selected,
@@ -466,7 +472,7 @@ fn account_menu(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: 
 fn account_row(
     ui: &mut egui::Ui,
     screen: &mut Screen,
-    photos: &[&str],
+    photos: &[Face],
     name: &str,
     unread: usize,
     selected: bool,
@@ -484,14 +490,14 @@ fn account_row(
     // Several photos overlap a little, the first on top.
     let size = 24.0;
     let left = rect.left() + 8.0;
-    for (index, email) in photos.iter().take(3).enumerate().rev() {
+    for (index, photo) in photos.iter().take(3).enumerate().rev() {
         let at = Pos2::new(left + index as f32 * 12.0, rect.center().y - size / 2.0);
         let circle = egui::Rect::from_min_size(at, Vec2::splat(size));
         if photos.len() > 1 {
             ui.painter()
                 .circle_filled(circle.center(), size / 2.0 + 1.5, palette.overlay);
         }
-        paint_avatar(ui, screen, email, circle);
+        paint_avatar(ui, screen, photo, circle);
     }
     let text_left = left + size + 12.0 * (photos.len().min(3) - 1) as f32 + 10.0;
     let count_width = if unread > 0 { 34.0 } else { 0.0 };
@@ -568,11 +574,25 @@ fn menu_row(ui: &mut egui::Ui, icon: MenuIcon, text: &str) -> bool {
         .clicked()
 }
 
-/// A round profile photo, or the address's first letter when there is none.
-fn paint_avatar(ui: &egui::Ui, screen: &mut Screen, email: &str, rect: egui::Rect) {
+/// Whose photo to draw: the address it is saved under, and the name whose
+/// first letter stands in when there is no photo.
+struct Face<'a> {
+    email: &'a str,
+    name: &'a str,
+}
+
+fn face<'a>(model: &'a Model, account: &'a Account) -> Face<'a> {
+    Face {
+        email: &account.email,
+        name: model.first_name(account.id).unwrap_or(&account.email),
+    }
+}
+
+/// A round profile photo, or the first letter of the name when there is none.
+fn paint_avatar(ui: &egui::Ui, screen: &mut Screen, face: &Face, rect: egui::Rect) {
     let palette = theme::palette(ui.ctx());
     let radius = rect.width() / 2.0;
-    match screen.photo(ui.ctx(), email) {
+    match screen.photo(ui.ctx(), face.email) {
         Some(texture) => {
             egui::Image::new((texture.id(), rect.size()))
                 .corner_radius(CornerRadius::same(radius.round() as u8))
@@ -581,7 +601,8 @@ fn paint_avatar(ui: &egui::Ui, screen: &mut Screen, email: &str, rect: egui::Rec
         None => {
             ui.painter()
                 .circle_filled(rect.center(), radius, palette.selected);
-            let initial = email
+            let initial = face
+                .name
                 .chars()
                 .next()
                 .map(|c| c.to_uppercase().to_string())

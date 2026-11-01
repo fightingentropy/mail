@@ -142,6 +142,22 @@ impl Store {
         Ok(account)
     }
 
+    /// The name on the newest mail sent from the account: how you sign your
+    /// mail. `None` until some is stored.
+    pub fn own_name(&self, account: &Account) -> anyhow::Result<Option<String>> {
+        let name = self
+            .connection
+            .query_row(
+                "SELECT from_name FROM messages
+                 WHERE account_id = ?1 AND from_addr = ?2 COLLATE NOCASE AND from_name <> ''
+                 ORDER BY internal_date DESC LIMIT 1",
+                params![account.id, account.email],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(name)
+    }
+
     /// Records how far sync got. Call only after every change up to
     /// `history_id` is stored.
     pub fn save_sync_point(

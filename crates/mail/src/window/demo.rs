@@ -63,7 +63,7 @@ const MAILBOX: &[Mail] = &[
     Mail {
         thread: "t-review",
         hours_ago: 4,
-        from: ("", ADDRESS),
+        from: ("Alex Rivera", ADDRESS),
         subject: "Re: Code review: offline queue for triage",
         body: "Good question. For v1 the status bar reports them after sync, and the next sync shows Gmail's state anyway. I'll add a log view if it turns out to matter.",
         labels: &["SENT"],

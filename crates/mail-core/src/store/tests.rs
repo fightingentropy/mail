@@ -100,6 +100,33 @@ fn migrations_run_once_and_reopen_cleanly() {
 }
 
 #[test]
+fn own_name_comes_from_the_newest_mail_you_sent() {
+    let mut store = Store::in_memory();
+    let account = store.add_account("me@example.com").unwrap();
+    assert_eq!(store.own_name(&account).unwrap(), None);
+    let sent = |id: &str, date: i64, name: &str, addr: &str| Message {
+        gmail_id: id.into(),
+        thread_id: id.into(),
+        internal_date: date,
+        from_name: name.into(),
+        from_addr: addr.into(),
+        ..Message::default()
+    };
+    store
+        .save_messages(
+            account.id,
+            &[
+                sent("a", 1, "Erlin H", "me@example.com"),
+                sent("b", 2, "Erlin", "ME@example.com"),
+                sent("c", 3, "", "me@example.com"),
+                sent("d", 4, "Someone Else", "else@example.com"),
+            ],
+        )
+        .unwrap();
+    assert_eq!(store.own_name(&account).unwrap().as_deref(), Some("Erlin"));
+}
+
+#[test]
 fn accounts_are_added_once_each_in_order() {
     let store = Store::in_memory();
     let first = store.add_account("me@example.com").unwrap();
