@@ -36,6 +36,8 @@ struct State {
     /// Saved drafts by ID: the raw RFC 5322 message and its thread.
     drafts: BTreeMap<String, (Vec<u8>, Option<String>)>,
     drafts_created: usize,
+    /// Label-only reads, as opposed to full downloads in `fetches`.
+    label_fetches: usize,
 }
 
 impl FakeGmail {
@@ -52,6 +54,7 @@ impl FakeGmail {
                 offline: false,
                 drafts: BTreeMap::new(),
                 drafts_created: 0,
+                label_fetches: 0,
             }),
         }
     }
@@ -89,6 +92,10 @@ impl FakeGmail {
 
     pub(crate) fn fetches(&self) -> usize {
         self.state.lock().unwrap().fetches
+    }
+
+    fn label_fetches(&self) -> usize {
+        self.state.lock().unwrap().label_fetches
     }
 
     pub(crate) fn add_attachment(&self, attachment_id: &str, contents: &[u8]) {
@@ -244,6 +251,15 @@ impl GmailApi for FakeGmail {
             return Ok(None);
         }
         Ok(state.attachments.get(attachment_id).cloned())
+    }
+
+    fn message_labels(&self, id: &str) -> anyhow::Result<Option<Vec<String>>> {
+        let mut state = self.state.lock().unwrap();
+        state.label_fetches += 1;
+        Ok(state
+            .messages
+            .get(id)
+            .map(|message| message.label_ids.clone()))
     }
 
     fn history(
@@ -506,13 +522,21 @@ fn expired_history_falls_back_to_a_full_sync() {
 
     gmail.delete("b");
     gmail.relabel("c", &["Label_1"]);
+    gmail.receive(mail("f", 0, "Tickets", "Gate opens", &["INBOX"]));
     gmail.expire_history();
+    let full_downloads = gmail.fetches();
 
     let report = run(&mut store, &gmail);
     assert_eq!(report.kind, SyncKind::Full);
     assert_eq!(report.deleted, 1);
     assert!(search(&store, "receipt").is_empty());
     assert_eq!(labels(&store, "c"), ["Label_1"]);
+    assert_eq!(search(&store, "gate"), ["f"]);
+    // Only the new message is downloaded in full; the four Mail already has
+    // get a label-only read at a third of the quota cost.
+    assert_eq!(gmail.fetches() - full_downloads, 1);
+    assert_eq!(gmail.label_fetches(), 4);
+    assert_eq!(report.relabeled, 4);
 }
 
 #[test]

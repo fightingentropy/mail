@@ -286,6 +286,8 @@ impl Model {
                 self.reload()?;
             }
             Action::Search(text) if text.trim().is_empty() => self.apply(Action::ClearSearch)?,
+            // One letter would match most of the mailbox; wait for a second.
+            Action::Search(text) if text.trim().chars().count() < 2 => {}
             Action::Search(text) => {
                 self.view = View::Search(text);
                 self.selected = 0;
@@ -405,7 +407,7 @@ impl Model {
                     });
                 }
             }
-            Action::OpenHtml => self.open_html(),
+            Action::OpenHtml => self.open_html()?,
         }
         Ok(())
     }
@@ -443,24 +445,27 @@ impl Model {
 
     /// The newest expanded message with an HTML version goes to the browser:
     /// that is the message on screen, or the one you just expanded.
-    fn open_html(&mut self) {
+    fn open_html(&mut self) -> anyhow::Result<()> {
         let Some(open) = &self.open else {
-            return;
+            return Ok(());
         };
         let newest = open
             .messages
             .iter()
             .zip(&open.expanded)
             .rev()
-            .filter(|(_, expanded)| **expanded)
-            .find_map(|(message, _)| {
-                let html = message.body_html.as_ref()?;
-                (!html.trim().is_empty()).then(|| (message.gmail_id.clone(), html.clone()))
-            });
-        match newest {
+            .find(|(message, expanded)| **expanded && message.has_html)
+            .map(|(message, _)| message.gmail_id.clone());
+        // HTML stays compressed in the database until it is asked for.
+        let html = match &newest {
+            Some(message_id) => self.store.message_html(self.account.id, message_id)?,
+            None => None,
+        };
+        match newest.zip(html) {
             Some((message_id, html)) => self.effects.push(Effect::OpenHtml { message_id, html }),
             None => self.notice = Some("This message has no HTML version.".into()),
         }
+        Ok(())
     }
 
     fn move_selection(&mut self, step: isize) -> anyhow::Result<()> {

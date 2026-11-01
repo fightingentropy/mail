@@ -323,6 +323,7 @@ fn typed_text_becomes_a_safe_fts_query() {
         Some("\"say\"* \"\"\"hi\"\"\"* \"OR\"* \"NEAR(\"*".into())
     );
     assert_eq!(fts_expression(" -- "), None);
+    assert_eq!(fts_expression("a bo"), Some("\"a\" \"bo\"*".into()));
 }
 
 #[test]
@@ -474,4 +475,180 @@ fn queued_changes_win_over_an_older_sync() {
         store.message(account, "m1").unwrap().unwrap().label_ids,
         ["UNREAD"]
     );
+}
+
+/// Timings on a 10,000-message mailbox, for checking performance changes:
+/// `cargo test -p mail-core --release -- --ignored scale_timings --nocapture`
+#[test]
+#[ignore]
+fn scale_timings() {
+    use std::time::Instant;
+
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("mail.sqlite3");
+    let mut store = Store::open(&path).unwrap();
+    let account = store.add_account("me@example.com").unwrap();
+    let words = [
+        "invoice", "ticket", "booking", "meeting", "receipt", "travel", "project", "review",
+        "dinner", "report",
+    ];
+    // Newsletters make rows wide: a few KB of HTML each, as in real mail.
+    let html = "<table><tr><td style=\"padding:8px\">A weekly update with links and images</td></tr></table>".repeat(40);
+    for chunk in 0..20 {
+        let batch: Vec<Message> = (0..500)
+            .map(|offset| {
+                let n = chunk * 500 + offset;
+                let labels: &[&str] = if n >= 9_400 { &["INBOX", "UNREAD"] } else { &[] };
+                let mut m = message(
+                    &format!("m{n}"),
+                    &format!("t{}", n / 2),
+                    n as i64 * 60_000,
+                    &format!("Sender {} <s{}@example.com>", n % 300, n % 300),
+                    &format!("About the {} number {n}", words[n % 10]),
+                    &format!("Hello, here is the {} you asked about, number {n}. Thanks, and see you soon.", words[(n + 3) % 10]),
+                    labels,
+                );
+                m.body_html = Some(html.clone());
+                m
+            })
+            .collect();
+        store.save_messages(account.id, &batch).unwrap();
+    }
+    let me = me(&store);
+    let time = |name: &str, run: &mut dyn FnMut() -> usize| {
+        let started = Instant::now();
+        let mut count = 0;
+        for _ in 0..5 {
+            count = run();
+        }
+        println!(
+            "{name:<34} {:>7.2} ms  ({count} results)",
+            started.elapsed().as_secs_f64() * 1000.0 / 5.0
+        );
+    };
+    time("search \"a\" (CLI, 50)", &mut || {
+        store.search(account.id, &query("a")).unwrap().len()
+    });
+    time("search \"tick\" (CLI, 50)", &mut || {
+        store.search(account.id, &query("tick")).unwrap().len()
+    });
+    let window_search = |text: &str| SearchQuery {
+        text: text.into(),
+        order: Order::Newest,
+        limit: 300,
+        ..SearchQuery::default()
+    };
+    time("search_threads \"tick\" (window, 300)", &mut || {
+        store
+            .search_threads(&me, &window_search("tick"))
+            .unwrap()
+            .len()
+    });
+    time("threads INBOX", &mut || {
+        store
+            .threads(&me, &ThreadFilter::Label("INBOX".into()))
+            .unwrap()
+            .len()
+    });
+    time("threads All mail", &mut || {
+        store.threads(&me, &ThreadFilter::AllMail).unwrap().len()
+    });
+    time("unread_counts", &mut || {
+        store.unread_counts(account.id).unwrap().len()
+    });
+    time("open a thread", &mut || {
+        store.thread(account.id, "t4800").unwrap().len()
+    });
+    drop(store);
+    let size = std::fs::metadata(&path).unwrap().len() as f64 / 1_048_576.0;
+    println!("{:<34} {size:>7.1} MB", "database");
+}
+
+#[test]
+fn html_is_stored_compressed_and_loaded_on_demand() {
+    let (mut store, account) = store_with_mail();
+    let html = "<p>Your <b>receipt</b> is attached.</p>".repeat(50);
+    let mut with_html = store.message(account, "m1").unwrap().unwrap();
+    with_html.body_html = Some(html.clone());
+    store.save_messages(account, &[with_html.clone()]).unwrap();
+
+    let read = store.message(account, "m1").unwrap().unwrap();
+    assert!(read.has_html);
+    assert_eq!(
+        read.body_html, None,
+        "lists and the reader never carry HTML"
+    );
+    assert_eq!(
+        store.message_html(account, "m1").unwrap().as_deref(),
+        Some(html.as_str())
+    );
+    let stored: i64 = store
+        .connection()
+        .query_row("SELECT length(html) FROM message_bodies", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(
+        stored < html.len() as i64 / 10,
+        "{stored} bytes stored for {}",
+        html.len()
+    );
+
+    with_html.body_html = None;
+    store.save_messages(account, &[with_html]).unwrap();
+    assert!(!store.message(account, "m1").unwrap().unwrap().has_html);
+    assert_eq!(store.message_html(account, "m1").unwrap(), None);
+}
+
+#[test]
+fn migration_moves_existing_html_out_and_compresses_it() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("mail.sqlite3");
+    let html = "<div>Weekly digest with plenty of markup</div>".repeat(200);
+    {
+        // A database as version 2 of Mail left it, HTML inline in `messages`.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(schema::MIGRATIONS[0]).unwrap();
+        connection.execute_batch(schema::MIGRATIONS[1]).unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        connection
+            .execute("INSERT INTO accounts (email) VALUES ('me@example.com')", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages (account_id, gmail_id, thread_id, internal_date, subject, body_text, body_html)
+                 VALUES (1, 'm1', 't1', 1000, 'Digest', 'Weekly digest', ?1),
+                        (1, 'm2', 't2', 2000, 'Plain', 'No HTML here', NULL)",
+                [&html],
+            )
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.message_html(1, "m1").unwrap().as_deref(),
+        Some(html.as_str())
+    );
+    assert_eq!(store.message_html(1, "m2").unwrap(), None);
+    assert!(store.message(1, "m1").unwrap().unwrap().has_html);
+    let kinds: Vec<String> = store
+        .connection()
+        .prepare("SELECT typeof(html) FROM message_bodies")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(kinds, ["blob"]);
+    let has_column: bool = store
+        .connection()
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('messages') WHERE name = 'body_html'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!has_column);
+    // Search still works on the rebuilt table.
+    assert_eq!(ids(&store.search(1, &query("digest")).unwrap()), ["m1"]);
 }

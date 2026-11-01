@@ -88,6 +88,9 @@ pub fn sync(paths: &Paths, days: u32) -> anyhow::Result<()> {
         if show_progress {
             let line = match progress {
                 Progress::Listing { found } => format!("Listing messages… {found}"),
+                Progress::Checking { done, total } => {
+                    format!("Checking labels {done} of {total}")
+                }
                 Progress::Downloading { done, total } => {
                     let since = *downloading_since.get_or_insert_with(Instant::now);
                     format!(
@@ -106,6 +109,10 @@ pub fn sync(paths: &Paths, days: u32) -> anyhow::Result<()> {
 
     let seconds = started.elapsed().as_secs_f64();
     match report.kind {
+        SyncKind::Full if report.relabeled > 0 => println!(
+            "Synced the last {days} days in {seconds:.1}s: {} messages downloaded, {} labels checked, {} removed.",
+            report.downloaded, report.relabeled, report.deleted
+        ),
         SyncKind::Full => println!(
             "Synced the last {days} days in {seconds:.1}s: {} messages downloaded, {} removed.",
             report.downloaded, report.deleted

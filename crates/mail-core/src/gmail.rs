@@ -25,6 +25,9 @@ pub trait GmailApi: Sync {
     fn message_ids(&self, query: &str, page_token: Option<&str>) -> anyhow::Result<IdPage>;
     /// A full message without attachment contents. `None` if it no longer exists.
     fn message(&self, id: &str) -> anyhow::Result<Option<ApiMessage>>;
+    /// Just a message's current labels, at a third of the quota cost of the
+    /// full message. `None` if it no longer exists.
+    fn message_labels(&self, id: &str) -> anyhow::Result<Option<Vec<String>>>;
     /// An attachment's contents. `None` when Gmail no longer accepts this
     /// attachment ID or the message is gone: Gmail can issue new attachment
     /// IDs, so the caller reads the message again for a fresh one.

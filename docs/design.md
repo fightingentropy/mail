@@ -116,7 +116,8 @@ are numbered and tracked with `PRAGMA user_version`
 |---|---|
 | `accounts` | Email address, the Gmail `history_id` reached by the last full or incremental sync, last sync time |
 | `labels` | Gmail label ID, name, system or user |
-| `messages` | One row per Gmail message: thread ID, received time (ms), subject, sender, To/Cc, snippet, plain text body, HTML body, threading headers |
+| `messages` | One row per Gmail message: thread ID, received time (ms), subject, sender, To/Cc, snippet, plain text body, threading headers |
+| `message_bodies` | Each message's HTML version, deflate-compressed, read only when opened in the browser |
 | `message_labels` | Message ↔ label ID. Gmail labels are per message; a thread shows the union |
 | `attachments` | Filename, type, size, Gmail attachment ID. Contents are fetched only when opened |
 | `message_search` | FTS5 index over subject, sender name and address, To, Cc and body |
@@ -135,6 +136,11 @@ Choices:
   client. Email bodies are long. Word tokens keep the index a fraction of a
   trigram index's size, give meaningful bm25 ranking, and still match as you
   type ("inv" finds "invoice").
+- **HTML apart and compressed.** HTML was 74% of the bytes in a real
+  mailbox but is read only when you press `h`. Since migration 3 it lives in
+  `message_bodies`, deflate-compressed, and is loaded on demand. On a real
+  database this went from 16.8 MB to 6.6 MB, and the narrower `messages`
+  table made list queries faster (see [Performance](#performance)).
 - **`format=full`, not `raw`.** Gmail returns the MIME tree with text parts
   inline and attachments by reference, so sync never downloads attachments.
   Mail decodes each text part from its declared charset (`encoding_rs`) and
@@ -150,9 +156,11 @@ Choices:
 - **Later syncs:** replay `users.history.list` from the saved history ID:
   download added messages, set labels from the newest label record, delete
   removed messages. When little has changed this takes a few requests.
-- **Expired history** (Gmail keeps roughly a week): fall back to a full pass,
-  which re-downloads the window and deletes local messages Gmail no longer
-  lists.
+- **Expired history** (Gmail keeps roughly a week): fall back to a full pass.
+  Gmail messages never change except for their labels, so only messages Mail
+  doesn't have are downloaded; the rest get a `format=minimal` read of their
+  labels at 20 quota units instead of 60. Local messages Gmail no longer lists
+  are deleted.
 - **Rate limits:** Gmail allows 6,000 quota units per user per minute. Since
   1 May 2026 a `format=full` message costs 60 units, a list 5, history 2. The
   first live sync, with 8 unpaced workers, had 84% of its fetches refused.
@@ -169,8 +177,12 @@ Choices:
 ## Search
 
 `mail search` and the agent `search` tool use the same query. Each typed word
-becomes a quoted prefix term, and all must match, so user input can never be
-an FTS syntax error. Filters: sender, label (by name or ID), date range.
+becomes a quoted term, and all must match, so user input can never be an FTS
+syntax error. Words of two or more characters also match as prefixes; a
+single character matches only itself, because a one-letter prefix scans most
+of the index. The window's live search starts at the second letter and asks
+only for matching thread IDs, without excerpts, then builds the list in one
+query. Filters: sender, label (by name or ID), date range.
 Results are ranked by bm25, weighting subject 8, sender 4, To 2 and body 1,
 or sorted newest first. Trash and spam are hidden unless named as the label.
 
@@ -261,12 +273,36 @@ Rules:
    images load there, so the sender learns the message was opened; the
    reader itself never loads anything.
 
+## Performance
+
+Measured on an Apple Silicon Mac with a release build. The window draws only
+on input (0% CPU when idle, about 126 MB, mostly GPU surfaces and the font
+atlas) and opens in under half a second.
+
+A benchmark builds a 10,000-message mailbox with realistic HTML and times
+the hot paths: `cargo test -p mail-core --release -- --ignored scale_timings --nocapture`.
+
+| | Before tuning | After |
+|---|---|---|
+| One-letter search | 27.9 ms | 0.08 ms |
+| Window search, 300 results | 6.8 ms | 1.6 ms |
+| All mail list, 5,000 conversations | 13.3 ms | 7.7 ms |
+| Inbox list, 300 conversations | 2.9 ms | 2.4 ms |
+| Word search (CLI) | 3.8 ms | 2.5 ms |
+| Database | 43.2 MB | 7.5 MB |
+
+On my real mailbox (454 messages): search 0.5–1.8 ms, incremental sync
+0.2–0.5 s, database 6.6 MB (was 16.8 MB). The first sync is bound by Gmail's
+quota, not by Mail: 285 s for 90 days. A resync after expired history went
+from 285 s to 95 s (451 label checks, nothing downloaded again).
+
 ## Risks
 
 - Google could restrict unverified personal-use apps. Fallback: IMAP with an
   app password, behind the same store.
-- More than a week offline means a full resync (minutes, not seconds).
+- More than a week offline means a full pass: labels for every stored
+  message plus anything new, about a minute and a half for my mailbox.
 - A full sync is bounded by Gmail's quota at about 100 messages a minute:
-  minutes for a personal mailbox, hours for a very busy one. Expired history
-  currently means re-downloading the window; refreshing known messages'
-  labels with `format=minimal` (20 units) would cut that by two thirds.
+  minutes for a personal mailbox, hours for a very busy one. A first pass of
+  headers only (`format=metadata`, 20 units) would make a big mailbox usable
+  sooner, with bodies filling in after.

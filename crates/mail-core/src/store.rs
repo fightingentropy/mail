@@ -3,6 +3,7 @@
 //! Gmail stays the source of truth. Everything here can be rebuilt by a full
 //! sync, which is what makes offline reading and instant search safe.
 
+mod bodies;
 mod changes;
 mod schema;
 mod search;
@@ -45,6 +46,7 @@ impl Store {
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "foreign_keys", true)?;
         schema::migrate(&mut connection)?;
+        bodies::compress_moved_html(&mut connection)?;
         Ok(Self { connection })
     }
 
@@ -227,9 +229,9 @@ impl Store {
             let mut upsert = transaction.prepare(
                 "INSERT INTO messages (
                     account_id, gmail_id, thread_id, internal_date, subject, from_name,
-                    from_addr, to_addrs, cc_addrs, snippet, body_text, body_html,
+                    from_addr, to_addrs, cc_addrs, snippet, body_text,
                     message_id_header, in_reply_to, references_header, size_estimate
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  ON CONFLICT (account_id, gmail_id) DO UPDATE SET
                     thread_id = excluded.thread_id,
                     internal_date = excluded.internal_date,
@@ -240,7 +242,6 @@ impl Store {
                     cc_addrs = excluded.cc_addrs,
                     snippet = excluded.snippet,
                     body_text = excluded.body_text,
-                    body_html = excluded.body_html,
                     message_id_header = excluded.message_id_header,
                     in_reply_to = excluded.in_reply_to,
                     references_header = excluded.references_header,
@@ -272,7 +273,6 @@ impl Store {
                         message.cc,
                         message.snippet,
                         message.body_text,
-                        message.body_html,
                         message.message_id_header,
                         message.in_reply_to,
                         message.references,
@@ -280,6 +280,7 @@ impl Store {
                     ],
                     |row| row.get(0),
                 )?;
+                bodies::save_html(&transaction, row_id, message.body_html.as_deref())?;
                 clear_labels.execute([row_id])?;
                 for label_id in unique(&message.label_ids) {
                     insert_label.execute(params![row_id, label_id])?;
@@ -440,7 +441,8 @@ impl Store {
 }
 
 const SELECT_MESSAGE: &str = "SELECT id, gmail_id, thread_id, internal_date, subject, from_name,
-    from_addr, to_addrs, cc_addrs, snippet, body_text, body_html, message_id_header,
+    from_addr, to_addrs, cc_addrs, snippet, body_text,
+    EXISTS (SELECT 1 FROM message_bodies b WHERE b.message_id = messages.id), message_id_header,
     in_reply_to, references_header, size_estimate FROM messages";
 
 fn message_from_row(row: &Row) -> rusqlite::Result<(i64, Message)> {
@@ -455,7 +457,9 @@ fn message_from_row(row: &Row) -> rusqlite::Result<(i64, Message)> {
         cc: row.get(8)?,
         snippet: row.get(9)?,
         body_text: row.get(10)?,
-        body_html: row.get(11)?,
+        // HTML stays in the database until asked for: see `message_html`.
+        body_html: None,
+        has_html: row.get(11)?,
         message_id_header: row.get(12)?,
         in_reply_to: row.get(13)?,
         references: row.get(14)?,

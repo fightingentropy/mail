@@ -203,6 +203,10 @@ impl Shell {
                 Event::Progress(Progress::Listing { found }) => {
                     self.screen.status = SyncStatus::Working(format!("Listing messages… {found}"));
                 }
+                Event::Progress(Progress::Checking { done, total }) => {
+                    self.screen.status =
+                        SyncStatus::Working(format!("Checking labels {done} of {total}"));
+                }
                 Event::Progress(Progress::Downloading { done, total }) => {
                     self.screen.status =
                         SyncStatus::Working(format!("Downloading {done} of {total}"));

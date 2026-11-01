@@ -118,9 +118,11 @@ mail (CLI, agent CLI, window)  →  mail-core: auth · gmail · sync · store
   After that, Gmail's History API supplies exact changes in a fraction of a
   second.
 - **Store.** One SQLite file in WAL mode. Messages, labels and attachment
-  metadata are stored; attachments download only when opened.
+  metadata are stored; HTML is kept compressed in its own table and
+  attachments download only when opened.
 - **Search.** An FTS5 index over subject, sender, recipients and body,
-  ranked with bm25. Words match as you type.
+  ranked with bm25. Words match as you type, from the second letter, in a
+  millisecond or two ([numbers](docs/design.md#performance)).
 - **Drafts.** Replies are built locally as RFC 5322 messages, threaded with
   `In-Reply-To` and `References`, and saved through Gmail's drafts API.
   There is no send call anywhere in Mail.

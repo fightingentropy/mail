@@ -356,3 +356,12 @@ fn plain_text_mail_says_it_has_no_html() {
         Some("This message has no HTML version.")
     );
 }
+
+#[test]
+fn live_search_waits_for_a_second_letter() {
+    let (mut model, _folder) = model();
+    model.apply(Action::Search("s".into())).unwrap();
+    assert_eq!(model.view, View::Mailbox("INBOX".into()));
+    model.apply(Action::Search("se".into())).unwrap();
+    assert_eq!(model.view, View::Search("se".into()));
+}

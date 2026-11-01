@@ -36,6 +36,7 @@ const PROFILE_UNITS: u32 = 1;
 const LABELS_UNITS: u32 = 1;
 const LIST_UNITS: u32 = 5;
 const MESSAGE_UNITS: u32 = 60;
+const MINIMAL_MESSAGE_UNITS: u32 = 20;
 const ATTACHMENT_UNITS: u32 = 20;
 const HISTORY_UNITS: u32 = 2;
 const MODIFY_UNITS: u32 = 10;
@@ -299,6 +300,21 @@ impl GmailApi for GmailClient {
             // An attachment ID Gmail has replaced comes back as 400 or 404.
             Reply::NotFound | Reply::Rejected(_) => Ok(None),
         }
+    }
+
+    fn message_labels(&self, id: &str) -> anyhow::Result<Option<Vec<String>>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Minimal {
+            #[serde(default)]
+            label_ids: Vec<String>,
+        }
+        let minimal: Option<Minimal> = self.get(
+            &format!("messages/{id}"),
+            &[("format", "minimal")],
+            MINIMAL_MESSAGE_UNITS,
+        )?;
+        Ok(minimal.map(|minimal| minimal.label_ids))
     }
 
     fn history(

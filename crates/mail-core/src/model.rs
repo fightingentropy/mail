@@ -124,7 +124,10 @@ pub struct Message {
     pub snippet: String,
     /// Plain text body. Converted from HTML when the message has no text part.
     pub body_text: String,
+    /// The HTML version, when parsed from Gmail. Messages read back from the
+    /// store leave it empty and set `has_html`; `Store::message_html` loads it.
     pub body_html: Option<String>,
+    pub has_html: bool,
     /// RFC 5322 threading headers, needed to write replies.
     pub message_id_header: Option<String>,
     pub in_reply_to: Option<String>,

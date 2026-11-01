@@ -71,25 +71,26 @@ impl Store {
     ) -> anyhow::Result<Vec<ThreadSummary>> {
         let mut seen = HashSet::new();
         let order: Vec<String> = self
-            .search(account.id, query)?
+            .matching_thread_ids(account.id, query)?
             .into_iter()
-            .map(|hit| hit.thread_id)
             .filter(|id| seen.insert(id.clone()))
             .collect();
 
+        // One query for every matching thread, then back into match order.
+        let ids = serde_json::to_string(&order)?;
         let mut statement = self.connection().prepare_cached(&format!(
             "SELECT {MESSAGE_COLUMNS} FROM messages m
-             WHERE m.account_id = ?1 AND m.thread_id = ?2
-             ORDER BY m.internal_date, m.id"
+             WHERE m.account_id = ?1 AND m.thread_id IN (SELECT value FROM json_each(?2))
+             ORDER BY m.thread_id, m.internal_date, m.id"
         ))?;
-        let mut threads = Vec::with_capacity(order.len());
-        for thread_id in &order {
-            let rows = statement
-                .query_map(params![account.id, thread_id], message_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            threads.extend(summarize(rows, &account.email));
-        }
-        Ok(threads)
+        let rows = statement
+            .query_map(params![account.id, ids], message_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut by_id: HashMap<String, ThreadSummary> = summarize(rows, &account.email)
+            .into_iter()
+            .map(|thread| (thread.thread_id.clone(), thread))
+            .collect();
+        Ok(order.iter().filter_map(|id| by_id.remove(id)).collect())
     }
 
     /// Unread threads per label, for the sidebar.

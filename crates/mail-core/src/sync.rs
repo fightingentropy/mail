@@ -22,7 +22,7 @@ use anyhow::Context;
 
 use crate::{
     gmail::{GmailApi, Outcome, parse_message},
-    model::{Account, Change, Label, LabelKind, Message},
+    model::{Account, Change, Label, LabelKind},
     store::Store,
 };
 
@@ -70,6 +70,11 @@ pub enum Progress {
         found: usize,
     },
     Downloading {
+        done: usize,
+        total: usize,
+    },
+    /// Reading the labels of messages already stored, after expired history.
+    Checking {
         done: usize,
         total: usize,
     },
@@ -159,17 +164,19 @@ fn full(
         }
     }
 
-    // A first sync that was interrupted skips what it already stored. A
-    // fallback after expired history downloads everything again, because
-    // labels may have changed on messages it already has.
+    // Gmail messages never change except for their labels, so only new ones
+    // are downloaded. A first sync resuming after an interruption already
+    // has current copies of the rest. After expired history their labels
+    // may have changed, and reading just the labels costs a third of a
+    // download.
     let known = store.message_ids(account.id)?;
-    let resuming_first_sync = account.history_id.is_none();
-    let to_download: Vec<String> = listed
-        .iter()
-        .filter(|id| !(resuming_first_sync && known.contains(*id)))
-        .cloned()
-        .collect();
-    let downloaded = download(store, api, account, to_download, options, progress)?;
+    let (stored, fresh): (Vec<String>, Vec<String>) =
+        listed.iter().cloned().partition(|id| known.contains(id));
+    let downloaded = download(store, api, account, fresh, options, progress)?;
+    let relabeled = match account.history_id {
+        Some(_) => refresh_labels(store, api, account, stored, options, progress)?,
+        None => 0,
+    };
 
     // Messages inside the window that Gmail no longer lists were deleted,
     // trashed or marked as spam while Mail was away. A day of margin keeps
@@ -187,7 +194,7 @@ fn full(
     Ok(SyncReport {
         kind: SyncKind::Full,
         downloaded,
-        relabeled: 0,
+        relabeled,
         deleted,
         pushed: 0,
         rejected: 0,
@@ -296,45 +303,21 @@ fn download(
     if total == 0 {
         return Ok(0);
     }
-    let queue = Mutex::new(ids.into_iter());
-    let (sender, receiver) = mpsc::sync_channel::<anyhow::Result<Option<Message>>>(BATCH);
-
-    thread::scope(|scope| {
-        for _ in 0..options.workers.clamp(1, 32) {
-            let sender = sender.clone();
-            let queue = &queue;
-            scope.spawn(move || {
-                loop {
-                    let Some(id) = queue.lock().unwrap().next() else {
-                        break;
-                    };
-                    let result = api
-                        .message(&id)
-                        .with_context(|| format!("Could not download message {id}"))
-                        .map(|found| found.map(parse_message));
-                    // A closed channel means the main thread stopped on an error.
-                    if sender.send(result).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(sender);
-
-        // Returning early drops the receiver, which stops the workers.
-        let mut batch = Vec::with_capacity(BATCH);
-        let mut stored = 0;
-        for (index, result) in receiver.into_iter().enumerate() {
-            let done = index + 1;
-            match result {
-                Ok(Some(message)) => batch.push(message),
-                Ok(None) => {}
-                Err(error) => {
-                    // Keep what already arrived; an interrupted first sync
-                    // resumes from the stored messages.
-                    store.save_messages(account.id, &batch)?;
-                    return Err(error);
-                }
+    let mut batch = Vec::with_capacity(BATCH);
+    let mut stored = 0;
+    let mut done = 0;
+    let fetched = in_parallel(
+        ids,
+        options.workers,
+        &|id| {
+            api.message(id)
+                .with_context(|| format!("Could not download message {id}"))
+                .map(|found| found.map(parse_message))
+        },
+        &mut |found| {
+            done += 1;
+            if let Some(message) = found {
+                batch.push(message);
             }
             if batch.len() == BATCH {
                 store.save_messages(account.id, &batch)?;
@@ -342,10 +325,86 @@ fn download(
                 batch.clear();
             }
             progress(Progress::Downloading { done, total });
+            Ok(())
+        },
+    );
+    // Keep what already arrived even after a failure: an interrupted first
+    // sync resumes from the stored messages.
+    store.save_messages(account.id, &batch)?;
+    stored += batch.len();
+    fetched.map(|()| stored)
+}
+
+/// Reads the current labels of messages Mail already has and stores them.
+/// Returns how many were updated.
+fn refresh_labels(
+    store: &mut Store,
+    api: &dyn GmailApi,
+    account: &Account,
+    ids: Vec<String>,
+    options: &SyncOptions,
+    progress: &mut dyn FnMut(Progress),
+) -> anyhow::Result<usize> {
+    let total = ids.len();
+    let mut changes: Vec<(String, Vec<String>)> = Vec::with_capacity(total);
+    let mut done = 0;
+    in_parallel(
+        ids,
+        options.workers,
+        &|id| {
+            api.message_labels(id)
+                .with_context(|| format!("Could not read the labels of message {id}"))
+                .map(|labels| labels.map(|labels| (id.to_owned(), labels)))
+        },
+        &mut |found| {
+            done += 1;
+            // Gone since listing: the deletion pass below takes care of it.
+            changes.extend(found);
+            progress(Progress::Checking { done, total });
+            Ok(())
+        },
+    )?;
+    store.set_labels(
+        account.id,
+        changes
+            .iter()
+            .map(|(id, labels)| (id.as_str(), labels.as_slice())),
+    )
+}
+
+/// Runs `fetch` for each ID on worker threads and gives each result to
+/// `handle` on this thread, as they finish. Parsing and network waits happen
+/// on the workers; the store is only touched here. Stops at the first error:
+/// dropping the channel then stops the workers.
+fn in_parallel<T: Send>(
+    ids: Vec<String>,
+    workers: usize,
+    fetch: &(dyn Fn(&str) -> anyhow::Result<T> + Sync),
+    handle: &mut dyn FnMut(T) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let queue = Mutex::new(ids.into_iter());
+    let (sender, receiver) = mpsc::sync_channel::<anyhow::Result<T>>(BATCH);
+    thread::scope(|scope| {
+        for _ in 0..workers.clamp(1, 32) {
+            let sender = sender.clone();
+            let queue = &queue;
+            scope.spawn(move || {
+                loop {
+                    let Some(id) = queue.lock().unwrap().next() else {
+                        break;
+                    };
+                    // A closed channel means this thread's caller stopped on an error.
+                    if sender.send(fetch(&id)).is_err() {
+                        break;
+                    }
+                }
+            });
         }
-        store.save_messages(account.id, &batch)?;
-        stored += batch.len();
-        Ok(stored)
+        drop(sender);
+        for result in receiver {
+            handle(result?)?;
+        }
+        Ok(())
     })
 }
 

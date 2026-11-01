@@ -15,8 +15,9 @@ pub enum Order {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchQuery {
-    /// Words to find. Each word also matches as a prefix ("inv" finds
-    /// "invoice"), and every word must match. Empty lists the newest mail.
+    /// Words to find. Words of two or more characters also match as
+    /// prefixes ("inv" finds "invoice"), and every word must match. Empty
+    /// lists the newest mail.
     pub text: String,
     /// Part of the sender's name or address, ignoring ASCII case.
     pub from: Option<String>,
@@ -81,6 +82,56 @@ const LABELS: &str =
 
 impl Store {
     pub fn search(&self, account_id: i64, query: &SearchQuery) -> anyhow::Result<Vec<SearchHit>> {
+        let matched = format!(
+            "m.gmail_id, m.thread_id, m.internal_date, m.from_name, m.from_addr, m.subject,
+             snippet(message_search, 5, '«', '»', '…', 16), {LABELS}"
+        );
+        let listed = format!(
+            "m.gmail_id, m.thread_id, m.internal_date, m.from_name, m.from_addr, m.subject,
+             m.snippet, {LABELS}"
+        );
+        self.run_search(account_id, query, (&matched, &listed), |row| {
+            let labels: Option<String> = row.get(7)?;
+            Ok(SearchHit {
+                gmail_id: row.get(0)?,
+                thread_id: row.get(1)?,
+                internal_date: row.get(2)?,
+                from_name: row.get(3)?,
+                from_addr: row.get(4)?,
+                subject: row.get(5)?,
+                excerpt: row.get(6)?,
+                label_ids: labels
+                    .unwrap_or_default()
+                    .split(' ')
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            })
+        })
+    }
+
+    /// The thread of each matching message, in result order. The window's
+    /// search list needs only these, and skipping excerpts and labels makes
+    /// the query several times cheaper.
+    pub(crate) fn matching_thread_ids(
+        &self,
+        account_id: i64,
+        query: &SearchQuery,
+    ) -> anyhow::Result<Vec<String>> {
+        self.run_search(account_id, query, ("m.thread_id", "m.thread_id"), |row| {
+            row.get(0)
+        })
+    }
+
+    /// Runs a search selecting `columns`: the first for a word search, the
+    /// second for a plain listing of the newest mail.
+    fn run_search<T>(
+        &self,
+        account_id: i64,
+        query: &SearchQuery,
+        columns: (&str, &str),
+        read: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
+    ) -> anyhow::Result<Vec<T>> {
         ensure!(
             (1..=500).contains(&query.limit),
             "limit must be between 1 and 500"
@@ -91,6 +142,7 @@ impl Store {
             "Search for words or numbers; punctuation alone matches nothing."
         );
 
+        let (matched, listed) = columns;
         let sql = match expression {
             Some(_) => {
                 let order = match query.order {
@@ -98,8 +150,7 @@ impl Store {
                     Order::Newest => "m.internal_date DESC".to_owned(),
                 };
                 format!(
-                    "SELECT m.gmail_id, m.thread_id, m.internal_date, m.from_name, m.from_addr,
-                            m.subject, snippet(message_search, 5, '«', '»', '…', 16), {LABELS}
+                    "SELECT {matched}
                      FROM message_search JOIN messages m ON m.id = message_search.rowid
                      WHERE message_search MATCH ?1 AND {FILTERS}
                      ORDER BY {order} LIMIT ?8 OFFSET ?9"
@@ -108,8 +159,7 @@ impl Store {
             // ?1 is always NULL here; it keeps parameter numbers the same in
             // both shapes.
             None => format!(
-                "SELECT m.gmail_id, m.thread_id, m.internal_date, m.from_name, m.from_addr,
-                        m.subject, m.snippet, {LABELS}
+                "SELECT {listed}
                  FROM messages m
                  WHERE ?1 IS NULL AND {FILTERS}
                  ORDER BY m.internal_date DESC LIMIT ?8 OFFSET ?9"
@@ -122,7 +172,7 @@ impl Store {
             .as_ref()
             .map(|from| format!("%{}%", escape_like(from)));
         let mut statement = self.connection().prepare(&sql)?;
-        let hits = statement
+        let rows = statement
             .query_map(
                 params![
                     expression.map(Value::Text).unwrap_or(Value::Null),
@@ -135,38 +185,31 @@ impl Store {
                     query.limit,
                     query.offset,
                 ],
-                |row| {
-                    let labels: Option<String> = row.get(7)?;
-                    Ok(SearchHit {
-                        gmail_id: row.get(0)?,
-                        thread_id: row.get(1)?,
-                        internal_date: row.get(2)?,
-                        from_name: row.get(3)?,
-                        from_addr: row.get(4)?,
-                        subject: row.get(5)?,
-                        excerpt: row.get(6)?,
-                        label_ids: labels
-                            .unwrap_or_default()
-                            .split(' ')
-                            .filter(|id| !id.is_empty())
-                            .map(str::to_owned)
-                            .collect(),
-                    })
-                },
+                read,
             )?
             .collect::<rusqlite::Result<_>>()?;
-        Ok(hits)
+        Ok(rows)
     }
 }
 
 /// Turns typed words into an FTS5 query that cannot be a syntax error: each
-/// word becomes a quoted prefix phrase, and all of them must match. Words with
-/// no letters or digits are dropped, since the tokenizer would ignore them.
+/// word becomes a quoted phrase, and all of them must match. Words of two or
+/// more characters also match as prefixes ("inv" finds "invoice"); a single
+/// character matches only itself, since a one-letter prefix would scan most
+/// of the index. Words with no letters or digits are dropped, since the
+/// tokenizer would ignore them.
 pub(crate) fn fts_expression(text: &str) -> Option<String> {
     let terms: Vec<String> = text
         .split_whitespace()
         .filter(|word| word.chars().any(char::is_alphanumeric))
-        .map(|word| format!("\"{}\"*", word.replace('"', "\"\"")))
+        .map(|word| {
+            let phrase = format!("\"{}\"", word.replace('"', "\"\""));
+            if word.chars().count() >= 2 {
+                phrase + "*"
+            } else {
+                phrase
+            }
+        })
         .collect();
     (!terms.is_empty()).then(|| terms.join(" "))
 }

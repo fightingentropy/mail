@@ -19,6 +19,8 @@ ureq = { version = "3", features = ["json"] }
 base64 = "0.22"
 sha2 = "0.10"
 getrandom = "0.3"
+# Compresses stored HTML. Already included through ureq.
+flate2 = "1"
 # Decodes text parts that are not UTF-8 (ISO-8859-1, Windows-1252, ...).
 encoding_rs = "0.8"
 # Standard macOS folders for the database and OAuth client.

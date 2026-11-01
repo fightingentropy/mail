@@ -6,7 +6,7 @@
 use anyhow::{Context, bail};
 use rusqlite::Connection;
 
-const MIGRATIONS: &[&str] = &[
+pub(super) const MIGRATIONS: &[&str] = &[
     // 1. Accounts, labels, messages, attachments and the full-text index.
     r#"
     CREATE TABLE accounts (
@@ -40,6 +40,7 @@ const MIGRATIONS: &[&str] = &[
         cc_addrs TEXT NOT NULL DEFAULT '',
         snippet TEXT NOT NULL DEFAULT '',
         body_text TEXT NOT NULL DEFAULT '',
+        -- Moved to message_bodies by migration 3.
         body_html TEXT,
         message_id_header TEXT,
         in_reply_to TEXT,
@@ -112,6 +113,19 @@ const MIGRATIONS: &[&str] = &[
         remove_labels TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL
     );
+    "#,
+    // 3. HTML moves to its own table, compressed, so `messages` stays narrow.
+    // SQL can't compress, so the HTML arrives here as text and Store::open
+    // compresses it once.
+    r#"
+    CREATE TABLE message_bodies (
+        message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        -- Deflate-compressed UTF-8.
+        html BLOB NOT NULL
+    );
+    INSERT INTO message_bodies (message_id, html)
+        SELECT id, body_html FROM messages WHERE trim(coalesce(body_html, '')) != '';
+    ALTER TABLE messages DROP COLUMN body_html;
     "#,
 ];
 

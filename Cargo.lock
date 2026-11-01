@@ -1639,6 +1639,7 @@ dependencies = [
  "base64 0.22.1",
  "directories",
  "encoding_rs",
+ "flate2",
  "getrandom 0.3.4",
  "rusqlite",
  "security-framework",
