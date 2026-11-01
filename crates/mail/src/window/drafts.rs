@@ -5,11 +5,12 @@
 use std::{sync::mpsc::Sender, thread};
 
 use mail_core::{
-    auth::{OAuthClient, keychain},
     compose::{self, Draft},
-    gmail::{GmailApi, GmailClient, Outcome},
+    gmail::{GmailApi, Outcome},
     paths::Paths,
 };
+
+use crate::accounts;
 
 pub enum Finished {
     Saved(String),
@@ -30,7 +31,7 @@ pub fn save(
     let paths = paths.clone();
     let from = from.to_owned();
     thread::spawn(move || {
-        let result = client(&paths, &from)
+        let result = accounts::client(&paths, &from)
             .and_then(|gmail| compose::save(&gmail, &from, &draft, existing.as_deref()));
         let _ = done.send(match result {
             Ok(id) => Finished::Saved(id),
@@ -50,7 +51,8 @@ pub fn discard(
     let paths = paths.clone();
     let from = from.to_owned();
     thread::spawn(move || {
-        let result = client(&paths, &from).and_then(|gmail| gmail.delete_draft(&draft_id));
+        let result =
+            accounts::client(&paths, &from).and_then(|gmail| gmail.delete_draft(&draft_id));
         let _ = done.send(match result {
             Ok(Outcome::Done | Outcome::Gone) => Finished::Discarded,
             Ok(Outcome::Rejected(message)) => {
@@ -75,7 +77,7 @@ pub fn send(
     let paths = paths.clone();
     let from = from.to_owned();
     thread::spawn(move || {
-        let result = client(&paths, &from).and_then(|gmail| {
+        let result = accounts::client(&paths, &from).and_then(|gmail| {
             compose::send(&gmail, &from, &draft, existing.as_deref(), |draft_id| {
                 let _ = done.send(Finished::Saved(draft_id.to_owned()));
             })
@@ -86,12 +88,4 @@ pub fn send(
         });
         wake();
     });
-}
-
-fn client(paths: &Paths, email: &str) -> anyhow::Result<GmailClient> {
-    Ok(GmailClient::new(
-        OAuthClient::load(&paths.oauth_client())?,
-        keychain::load(email)?,
-        None,
-    ))
 }

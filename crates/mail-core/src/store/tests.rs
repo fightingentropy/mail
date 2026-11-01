@@ -100,11 +100,20 @@ fn migrations_run_once_and_reopen_cleanly() {
 }
 
 #[test]
-fn one_account_per_database() {
+fn accounts_are_added_once_each_in_order() {
     let store = Store::in_memory();
-    store.add_account("me@example.com").unwrap();
-    assert!(store.add_account("ME@example.com").is_ok());
-    assert!(store.add_account("someone@example.com").is_err());
+    let first = store.add_account("me@example.com").unwrap();
+    assert_eq!(store.add_account("ME@example.com").unwrap().id, first.id);
+    store.add_account("work@example.org").unwrap();
+    let emails: Vec<String> = store
+        .accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.email)
+        .collect();
+    assert_eq!(emails, ["me@example.com", "work@example.org"]);
+    // The command line keeps reading the first.
+    assert_eq!(store.account().unwrap().unwrap().id, first.id);
 }
 
 #[test]

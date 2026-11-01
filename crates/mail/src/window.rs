@@ -21,11 +21,14 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
+    thread,
     time::Instant,
 };
 
 use anyhow::Context;
-use mail_core::{compose::Draft, paths::Paths, store::Store, sync::Progress};
+use mail_core::{auth::OAuthClient, compose::Draft, paths::Paths, store::Store, sync::Progress};
+
+use crate::accounts;
 
 use background::{Event, Syncer};
 use downloads::Downloader;
@@ -52,16 +55,17 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
         Some(folder) => {
             let _ = fs::remove_dir_all(folder);
             demo::seed(&folder.join("mail.sqlite3"))?;
+            demo::seed_work(&folder.join("mail.sqlite3"))?;
             Paths::under(folder)
         }
         None => paths.clone(),
     };
 
     let store = Store::open(&paths.database())?;
-    let account = store
+    store
         .account()?
         .context("Not signed in. Run `mail auth --client <file>` in Terminal first.")?;
-    let model = Model::new(store, account)?;
+    let model = Model::new(store)?;
 
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -97,6 +101,7 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
                 Syncer::start(paths.clone(), move || ctx.request_repaint())
             });
             let (drafts_done, drafts) = mpsc::channel();
+            let (sign_ins_done, sign_ins) = mpsc::channel();
             let status = if demo {
                 SyncStatus::Demo
             } else {
@@ -104,12 +109,14 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
             };
             Ok(Box::new(Shell {
                 model,
-                screen: Screen::new(status, paths.root.join("shortcuts.json")),
+                screen: Screen::new(status, paths.clone()),
                 syncer,
                 paths,
                 demo,
                 drafts,
                 drafts_done,
+                sign_ins,
+                sign_ins_done,
                 downloader,
                 screenshot: screenshot.map(|path| Screenshot { path, frames: 0 }),
                 script,
@@ -134,6 +141,9 @@ struct Shell {
     /// Results of draft saves and discards running on their own threads.
     drafts: Receiver<Finished>,
     drafts_done: Sender<Finished>,
+    /// Results of "Add account…": the new account's address, or the error.
+    sign_ins: Receiver<Result<String, String>>,
+    sign_ins_done: Sender<Result<String, String>>,
     /// `None` in the demo, which has no Gmail to download from.
     downloader: Option<Downloader>,
     screenshot: Option<Screenshot>,
@@ -165,6 +175,7 @@ impl eframe::App for Shell {
         self.receive_sync_events();
         self.receive_draft_results();
         self.receive_downloads();
+        self.receive_sign_ins();
         if let Some(syncer) = &self.syncer
             && (std::mem::take(&mut self.model.wants_sync)
                 || std::mem::take(&mut self.screen.sync_requested))
@@ -246,6 +257,26 @@ impl Shell {
                     self.reload();
                 }
                 Event::Failed(error) => self.screen.status = SyncStatus::Failed(error),
+                Event::Photo(email) => self.screen.forget_photo(&email),
+            }
+        }
+    }
+
+    /// Picks up accounts signed in from the window, and syncs them.
+    fn receive_sign_ins(&mut self) {
+        let results: Vec<Result<String, String>> = self.sign_ins.try_iter().collect();
+        for result in results {
+            match result {
+                Ok(email) => {
+                    self.screen.forget_photo(&email);
+                    self.reload();
+                    self.model.notify(format!("Signed in as {email}."));
+                    if let Some(syncer) = &self.syncer {
+                        self.screen.status = SyncStatus::Working("Syncing…".into());
+                        syncer.sync_now();
+                    }
+                }
+                Err(error) => self.model.notify(error),
             }
         }
     }
@@ -300,28 +331,38 @@ impl Shell {
                     Err(error) => Some(format!("{error:#}")),
                 },
                 Effect::Download {
+                    account,
                     message_id,
                     attachment,
                 } => match &self.downloader {
                     Some(downloader) => {
                         let notice = format!("Downloading {}…", attachment.filename);
-                        downloader.download(message_id, attachment);
+                        downloader.download(account, message_id, attachment);
                         Some(notice)
                     }
                     None => Some("Downloads aren't available in the demo.".to_owned()),
                 },
-                Effect::SaveDraft { draft, draft_id } => {
-                    self.save_draft(ctx, draft, draft_id);
+                Effect::SaveDraft {
+                    from,
+                    draft,
+                    draft_id,
+                } => {
+                    self.save_draft(ctx, &from, draft, draft_id);
                     None
                 }
-                Effect::DiscardDraft(draft_id) => {
-                    self.discard_draft(ctx, draft_id);
+                Effect::DiscardDraft { from, draft_id } => {
+                    self.discard_draft(ctx, &from, draft_id);
                     None
                 }
-                Effect::SendDraft { draft, draft_id } => {
-                    self.send_draft(ctx, draft, draft_id);
+                Effect::SendDraft {
+                    from,
+                    draft,
+                    draft_id,
+                } => {
+                    self.send_draft(ctx, &from, draft, draft_id);
                     None
                 }
+                Effect::AddAccount => self.add_account(ctx),
                 Effect::OpenHtml { message_id, html } => {
                     Some(match files::open_html(&message_id, &html) {
                         Ok(_) => "Opened the HTML version in your browser.".to_owned(),
@@ -335,7 +376,13 @@ impl Shell {
         }
     }
 
-    fn save_draft(&mut self, ctx: &egui::Context, draft: Draft, draft_id: Option<String>) {
+    fn save_draft(
+        &mut self,
+        ctx: &egui::Context,
+        from: &str,
+        draft: Draft,
+        draft_id: Option<String>,
+    ) {
         if self.demo {
             self.apply(Action::DraftFailed(
                 "The demo mailbox doesn't save drafts.".into(),
@@ -345,7 +392,7 @@ impl Shell {
         let wake = ctx.clone();
         drafts::save(
             &self.paths,
-            &self.model.account.email,
+            from,
             draft,
             draft_id,
             self.drafts_done.clone(),
@@ -353,7 +400,13 @@ impl Shell {
         );
     }
 
-    fn send_draft(&mut self, ctx: &egui::Context, draft: Draft, draft_id: Option<String>) {
+    fn send_draft(
+        &mut self,
+        ctx: &egui::Context,
+        from: &str,
+        draft: Draft,
+        draft_id: Option<String>,
+    ) {
         if self.demo {
             self.apply(Action::SendFailed("The demo mailbox doesn't send.".into()));
             return;
@@ -361,7 +414,7 @@ impl Shell {
         let wake = ctx.clone();
         drafts::send(
             &self.paths,
-            &self.model.account.email,
+            from,
             draft,
             draft_id,
             self.drafts_done.clone(),
@@ -369,18 +422,40 @@ impl Shell {
         );
     }
 
-    fn discard_draft(&mut self, ctx: &egui::Context, draft_id: String) {
+    fn discard_draft(&mut self, ctx: &egui::Context, from: &str, draft_id: String) {
         if self.demo {
             return;
         }
         let wake = ctx.clone();
         drafts::discard(
             &self.paths,
-            &self.model.account.email,
+            from,
             draft_id,
             self.drafts_done.clone(),
             move || wake.request_repaint(),
         );
+    }
+
+    /// Google sign-in runs in the browser; the window waits on a thread of
+    /// its own. Returns a notice for the status bar.
+    fn add_account(&mut self, ctx: &egui::Context) -> Option<String> {
+        if self.demo {
+            return Some("Adding accounts isn't available in the demo.".into());
+        }
+        let client = match OAuthClient::load(&self.paths.oauth_client()) {
+            Ok(client) => client,
+            Err(error) => return Some(format!("{error:#}")),
+        };
+        let paths = self.paths.clone();
+        let done = self.sign_ins_done.clone();
+        let wake = ctx.clone();
+        thread::spawn(move || {
+            let result = accounts::sign_in(&paths, client, files::open_link)
+                .map_err(|error| format!("Could not add the account: {error:#}"));
+            let _ = done.send(result);
+            wake.request_repaint();
+        });
+        Some("Finish signing in in your browser.".into())
     }
 
     fn apply(&mut self, action: Action) {

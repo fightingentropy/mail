@@ -84,6 +84,10 @@ pub enum Action {
     },
     /// Shows the newest expanded message's HTML in the browser.
     OpenHtml,
+    /// Shows one account's mail, or every account's with `None`.
+    SetScope(Option<i64>),
+    /// Starts Google sign-in for another account.
+    AddAccount,
 }
 
 /// Work for the window shell that the model can't do itself: open a link,
@@ -93,6 +97,8 @@ pub enum Action {
 pub enum Effect {
     OpenLink(String),
     Download {
+        /// The address of the account the message belongs to.
+        account: String,
         message_id: String,
         attachment: Attachment,
     },
@@ -101,16 +107,24 @@ pub enum Effect {
         html: String,
     },
     /// Save to Gmail's Drafts, replacing the draft with this ID if there is one.
+    /// `from` is the address of the account the draft belongs to.
     SaveDraft {
+        from: String,
         draft: Draft,
         draft_id: Option<String>,
     },
-    DiscardDraft(String),
+    DiscardDraft {
+        from: String,
+        draft_id: String,
+    },
     /// Save and send, after you confirmed. The only way Mail sends mail.
     SendDraft {
+        from: String,
         draft: Draft,
         draft_id: Option<String>,
     },
+    /// Google sign-in in the browser, for another account.
+    AddAccount,
 }
 
 /// Who and what a send goes to, as the confirmation shows it.
@@ -123,6 +137,7 @@ pub struct SendSummary {
 
 /// The thread in the reader.
 pub struct OpenThread {
+    pub account_id: i64,
     pub thread_id: String,
     pub subject: String,
     pub messages: Vec<Message>,
@@ -136,6 +151,7 @@ pub struct Picker {
 
 /// Enough to put a thread back the way it was.
 struct Undo {
+    account_id: i64,
     thread_id: String,
     labels_before: BTreeSet<String>,
     trashed: bool,
@@ -143,9 +159,14 @@ struct Undo {
 
 pub struct Model {
     store: Store,
-    pub account: Account,
-    pub labels: Vec<Label>,
-    pub unread: HashMap<String, usize>,
+    /// Every signed-in account, in the order they were added.
+    pub accounts: Vec<Account>,
+    /// The account whose mail is shown, or `None` for all of them.
+    pub scope: Option<i64>,
+    /// Each account's labels.
+    labels: HashMap<i64, Vec<Label>>,
+    /// Unread threads per label, for each account.
+    unread: HashMap<i64, HashMap<String, usize>>,
     pub view: View,
     /// The mailbox to return to when a search is cleared.
     mailbox: String,
@@ -174,11 +195,12 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(store: Store, account: Account) -> anyhow::Result<Self> {
+    pub fn new(store: Store) -> anyhow::Result<Self> {
         let mut model = Self {
             store,
-            account,
-            labels: Vec::new(),
+            accounts: Vec::new(),
+            scope: None,
+            labels: HashMap::new(),
             unread: HashMap::new(),
             view: View::Mailbox("INBOX".into()),
             mailbox: "INBOX".into(),
@@ -206,20 +228,69 @@ impl Model {
     }
 
     pub fn pending_changes(&self) -> usize {
-        self.store
-            .pending_changes(self.account.id)
+        self.accounts
+            .iter()
+            .filter_map(|account| self.store.pending_changes(account.id).ok())
             .map(|pending| pending.len())
+            .sum()
+    }
+
+    pub fn account(&self, id: i64) -> Option<&Account> {
+        self.accounts.iter().find(|account| account.id == id)
+    }
+
+    /// Your address in an account, for "me" and for replies.
+    pub fn own_address(&self, account_id: i64) -> &str {
+        self.account(account_id)
+            .map_or("", |account| account.email.as_str())
+    }
+
+    /// The accounts the list shows: the chosen one, or all of them.
+    pub fn shown_accounts(&self) -> impl Iterator<Item = &Account> {
+        self.accounts
+            .iter()
+            .filter(|account| self.scope.is_none_or(|id| id == account.id))
+    }
+
+    pub fn labels(&self, account_id: i64) -> &[Label] {
+        self.labels.get(&account_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Unread threads with `label` in the accounts shown.
+    pub fn unread(&self, label: &str) -> usize {
+        self.shown_accounts()
+            .map(|account| self.unread_in(account.id, label))
+            .sum()
+    }
+
+    pub fn unread_in(&self, account_id: i64, label: &str) -> usize {
+        self.unread
+            .get(&account_id)
+            .and_then(|counts| counts.get(label))
+            .copied()
             .unwrap_or(0)
     }
 
-    /// User labels matching the picker filter.
+    /// When the shown accounts last synced: the oldest of them, or `None`
+    /// while any has never synced.
+    pub fn synced_at(&self) -> Option<i64> {
+        self.shown_accounts()
+            .map(|account| account.synced_at)
+            .collect::<Option<Vec<i64>>>()?
+            .into_iter()
+            .min()
+    }
+
+    /// User labels matching the picker filter, from the selected thread's
+    /// account.
     pub fn picker_labels(&self) -> Vec<&Label> {
         let filter = self
             .picker
             .as_ref()
             .map(|picker| picker.filter.to_lowercase())
             .unwrap_or_default();
-        self.labels
+        let account = self.selected_thread().map_or(0, |thread| thread.account_id);
+        self.labels(account)
             .iter()
             .filter(|label| label.kind == LabelKind::User)
             .filter(|label| label.name.to_lowercase().contains(&filter))
@@ -229,33 +300,53 @@ impl Model {
     /// Reads everything again from the database, keeping the selection on
     /// the same thread when it is still listed, or at the same position.
     pub fn reload(&mut self) -> anyhow::Result<()> {
-        // Sync may have stored the account's first history ID meanwhile.
-        if let Some(account) = self.store.account()? {
-            self.account = account;
+        // Sync moves sync points, and accounts may have been added.
+        self.accounts = self.store.accounts()?;
+        if self.scope.is_some_and(|id| self.account(id).is_none()) {
+            self.scope = None;
         }
-        self.labels = self.store.labels(self.account.id)?;
-        self.unread = self.store.unread_counts(self.account.id)?;
-        let previous = self.selected_thread().map(|t| t.thread_id.clone());
-        self.threads = match &self.view {
-            View::Mailbox(id) if id == "ALL" => {
-                self.store.threads(&self.account, &ThreadFilter::AllMail)?
-            }
-            View::Mailbox(id) => self
-                .store
-                .threads(&self.account, &ThreadFilter::Label(id.clone()))?,
-            View::Search(text) => self.store.search_threads(
-                &self.account,
-                &SearchQuery {
-                    text: text.clone(),
-                    order: Order::Newest,
-                    limit: 300,
-                    ..SearchQuery::default()
-                },
-            )?,
-        };
-        if let Some(index) =
-            previous.and_then(|id| self.threads.iter().position(|t| t.thread_id == id))
-        {
+        self.labels.clear();
+        self.unread.clear();
+        for account in &self.accounts {
+            self.labels
+                .insert(account.id, self.store.labels(account.id)?);
+            self.unread
+                .insert(account.id, self.store.unread_counts(account.id)?);
+        }
+        let previous = self
+            .selected_thread()
+            .map(|t| (t.account_id, t.thread_id.clone()));
+        let shown: Vec<Account> = self.shown_accounts().cloned().collect();
+        let mut threads = Vec::new();
+        for account in &shown {
+            threads.extend(match &self.view {
+                View::Mailbox(id) if id == "ALL" => {
+                    self.store.threads(account, &ThreadFilter::AllMail)?
+                }
+                View::Mailbox(id) => self
+                    .store
+                    .threads(account, &ThreadFilter::Label(id.clone()))?,
+                View::Search(text) => self.store.search_threads(
+                    account,
+                    &SearchQuery {
+                        text: text.clone(),
+                        order: Order::Newest,
+                        limit: 300,
+                        ..SearchQuery::default()
+                    },
+                )?,
+            });
+        }
+        // Every list is newest first, so the accounts merge by date.
+        if shown.len() > 1 {
+            threads.sort_by_key(|thread| std::cmp::Reverse(thread.last_date));
+        }
+        self.threads = threads;
+        if let Some(index) = previous.and_then(|(account, id)| {
+            self.threads
+                .iter()
+                .position(|t| t.account_id == account && t.thread_id == id)
+        }) {
             self.selected = index;
         }
         self.selected = self.selected.min(self.threads.len().saturating_sub(1));
@@ -357,19 +448,33 @@ impl Model {
             Action::CloseHelp => self.help = false,
             Action::Reply | Action::ReplyAll => {
                 let all = action == Action::ReplyAll;
-                match self.reply_target() {
-                    Some(message) => {
-                        self.compose = Some(Compose::reply(message, &self.account.email, all));
+                let own = self
+                    .open
+                    .as_ref()
+                    .map(|open| self.own_address(open.account_id));
+                match self.reply_target().zip(own) {
+                    Some((message, own)) => {
+                        self.compose = Some(Compose::reply(message, own, all));
                     }
                     None => self.notify("Nothing to reply to.".into()),
                 }
             }
-            Action::NewMessage => self.compose = Some(Compose::new_message()),
+            Action::NewMessage => {
+                // From the account shown, or the first when all are.
+                let from = self
+                    .scope
+                    .and_then(|id| self.account(id))
+                    .or(self.accounts.first());
+                if let Some(from) = from {
+                    self.compose = Some(Compose::new_message(&from.email));
+                }
+            }
             Action::SaveDraft => {
                 if let Some(compose) = &mut self.compose
                     && let Some(draft) = compose.begin_save()
                 {
                     self.effects.push(Effect::SaveDraft {
+                        from: compose.from.clone(),
                         draft,
                         draft_id: compose.draft_id.clone(),
                     });
@@ -379,7 +484,10 @@ impl Model {
             Action::DiscardDraft => {
                 if let Some(compose) = self.compose.take() {
                     if let Some(draft_id) = compose.draft_id {
-                        self.effects.push(Effect::DiscardDraft(draft_id));
+                        self.effects.push(Effect::DiscardDraft {
+                            from: compose.from,
+                            draft_id,
+                        });
                     }
                     self.notify("Draft discarded.".into());
                 }
@@ -412,6 +520,7 @@ impl Model {
                     && let Some(draft) = compose.begin_send()
                 {
                     self.effects.push(Effect::SendDraft {
+                        from: compose.from.clone(),
                         draft,
                         draft_id: compose.draft_id.clone(),
                     });
@@ -450,22 +559,34 @@ impl Model {
                 message,
                 attachment,
             } => {
-                let found = self
-                    .open
-                    .as_ref()
-                    .and_then(|open| open.messages.get(message))
-                    .and_then(|message| {
-                        let attachment = message.attachments.get(attachment)?.clone();
-                        Some((message.gmail_id.clone(), attachment))
-                    });
-                if let Some((message_id, attachment)) = found {
+                let found = self.open.as_ref().and_then(|open| {
+                    let message = open.messages.get(message)?;
+                    let attachment = message.attachments.get(attachment)?.clone();
+                    Some((open.account_id, message.gmail_id.clone(), attachment))
+                });
+                if let Some((account, message_id, attachment)) = found {
                     self.effects.push(Effect::Download {
+                        account: self.own_address(account).to_owned(),
                         message_id,
                         attachment,
                     });
                 }
             }
             Action::OpenHtml => self.open_html()?,
+            Action::SetScope(scope) => {
+                self.scope = scope.filter(|id| self.account(*id).is_some());
+                // Labels belong to one account; the shared mailboxes carry over.
+                let shared = |id: &str| MAILBOXES.iter().any(|(mailbox, _)| *mailbox == id);
+                if !shared(&self.mailbox) {
+                    self.mailbox = "INBOX".into();
+                }
+                if matches!(&self.view, View::Mailbox(id) if !shared(id)) {
+                    self.view = View::Mailbox(self.mailbox.clone());
+                }
+                self.selected = 0;
+                self.reload()?;
+            }
+            Action::AddAccount => self.effects.push(Effect::AddAccount),
         }
         Ok(())
     }
@@ -513,9 +634,10 @@ impl Model {
         if shown < READ_AFTER {
             return Ok(Some(READ_AFTER - shown));
         }
-        let thread_id = self.threads[self.selected].thread_id.clone();
+        let thread = &self.threads[self.selected];
+        let (account, thread_id) = (thread.account_id, thread.thread_id.clone());
         self.store
-            .apply_change(self.account.id, &thread_id, &Change::remove("UNREAD"))?;
+            .apply_change(account, &thread_id, &Change::remove("UNREAD"))?;
         self.viewed_since = None;
         self.wants_sync = true;
         self.reload()?;
@@ -578,7 +700,7 @@ impl Model {
             .map(|(message, _)| message.gmail_id.clone());
         // HTML stays compressed in the database until it is asked for.
         let html = match &newest {
-            Some(message_id) => self.store.message_html(self.account.id, message_id)?,
+            Some(message_id) => self.store.message_html(open.account_id, message_id)?,
             None => None,
         };
         match newest.zip(html) {
@@ -609,14 +731,14 @@ impl Model {
         let Some(thread) = self.selected_thread() else {
             return Ok(());
         };
-        let thread_id = thread.thread_id.clone();
+        let (account, thread_id) = (thread.account_id, thread.thread_id.clone());
         self.undo = Some(Undo {
             labels_before: thread.label_ids.iter().cloned().collect(),
             trashed: change == Change::Trash,
+            account_id: account,
             thread_id: thread_id.clone(),
         });
-        self.store
-            .apply_change(self.account.id, &thread_id, &change)?;
+        self.store.apply_change(account, &thread_id, &change)?;
         self.notify(match self.undo_key.as_str() {
             "" => format!("{done}."),
             key => format!("{done}. Press {key} to undo."),
@@ -646,7 +768,7 @@ impl Model {
             self.notify("Nothing to undo.".into());
             return Ok(());
         };
-        let account = self.account.id;
+        let account = undo.account_id;
         if undo.trashed {
             self.store
                 .apply_change(account, &undo.thread_id, &Change::Untrash)?;
@@ -669,7 +791,7 @@ impl Model {
         if let Some(index) = self
             .threads
             .iter()
-            .position(|t| t.thread_id == undo.thread_id)
+            .position(|t| t.account_id == account && t.thread_id == undo.thread_id)
         {
             self.selected = index;
             self.reveal_selected = true;
@@ -680,7 +802,11 @@ impl Model {
 
     fn toggle_label(&mut self, clicked: Option<String>) -> anyhow::Result<()> {
         let label = match clicked {
-            Some(id) => self.labels.iter().find(|label| label.id == id).cloned(),
+            Some(id) => self
+                .picker_labels()
+                .into_iter()
+                .find(|label| label.id == id)
+                .cloned(),
             None => {
                 let highlighted = self.picker.as_ref().map_or(0, |p| p.highlighted);
                 self.picker_labels()
@@ -707,13 +833,14 @@ impl Model {
             self.viewed_since = None;
             return Ok(());
         };
+        let account = summary.account_id;
         if self
             .open
             .as_ref()
-            .is_some_and(|open| open.thread_id == summary.thread_id)
+            .is_some_and(|open| open.account_id == account && open.thread_id == summary.thread_id)
         {
             // Same thread: refresh messages and labels but keep what is expanded.
-            let messages = self.store.thread(self.account.id, &summary.thread_id)?;
+            let messages = self.store.thread(account, &summary.thread_id)?;
             if let Some(open) = &mut self.open
                 && open.messages.len() == messages.len()
             {
@@ -721,7 +848,7 @@ impl Model {
                 return Ok(());
             }
         }
-        let messages = self.store.thread(self.account.id, &summary.thread_id)?;
+        let messages = self.store.thread(account, &summary.thread_id)?;
         let last = messages.len().saturating_sub(1);
         let expanded = messages
             .iter()
@@ -729,6 +856,7 @@ impl Model {
             .map(|(index, message)| index == last || message.has_label("UNREAD"))
             .collect();
         self.open = Some(OpenThread {
+            account_id: account,
             thread_id: summary.thread_id.clone(),
             subject: summary.subject.clone(),
             messages,

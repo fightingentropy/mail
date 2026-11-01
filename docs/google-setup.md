@@ -24,7 +24,9 @@ click **Get started**.
 3. **Contact information:** your address. Agree to the policy and create.
 4. **Data Access → Add or remove scopes:** paste
    `https://www.googleapis.com/auth/gmail.modify` under *Manually add scopes*,
-   click **Add to table**, then **Update** and **Save**.
+   click **Add to table**, then **Update** and **Save**. Also tick
+   `.../auth/userinfo.profile` in the list (your name and profile photo, for
+   the account menu); Google counts it as non-sensitive.
 5. **Branding → App domain:** Google won't let you publish without a home
    page and a privacy policy link. Your fork on GitHub works for both, for
    example `https://github.com/you/mail` and

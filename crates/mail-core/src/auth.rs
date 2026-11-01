@@ -23,6 +23,11 @@ use sha2::{Digest, Sha256};
 /// Mail sends only from the window, after you confirm.
 pub const GMAIL_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 
+/// Your name and profile photo, for the account menu. Google counts it as
+/// non-sensitive. Accounts signed in before it was asked for show initials
+/// until they sign in again.
+pub const PROFILE_SCOPE: &str = "https://www.googleapis.com/auth/userinfo.profile";
+
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const KEYCHAIN_SERVICE: &str = "org.erlin.mail";
@@ -120,7 +125,7 @@ pub fn sign_in(
             ("client_id", client.client_id.as_str()),
             ("redirect_uri", &redirect_uri),
             ("response_type", "code"),
-            ("scope", GMAIL_SCOPE),
+            ("scope", &format!("{GMAIL_SCOPE} {PROFILE_SCOPE}")),
             ("code_challenge", &pkce_challenge(&verifier)),
             ("code_challenge_method", "S256"),
             ("state", &state),

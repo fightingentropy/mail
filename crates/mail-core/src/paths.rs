@@ -36,6 +36,19 @@ impl Paths {
     pub fn oauth_client(&self) -> PathBuf {
         self.root.join("oauth-client.json")
     }
+
+    /// An account's Google profile photo, saved after sign-in or sync.
+    pub fn photo(&self, email: &str) -> PathBuf {
+        let name: String = email
+            .to_lowercase()
+            .chars()
+            .map(|c| match c {
+                'a'..='z' | '0'..='9' | '@' | '.' | '-' | '_' | '+' => c,
+                _ => '_',
+            })
+            .collect();
+        self.root.join("photos").join(name)
+    }
 }
 
 /// Your Downloads folder, where opened attachments are saved.

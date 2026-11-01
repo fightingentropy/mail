@@ -98,6 +98,20 @@ action, and Reset puts the defaults back. Changes are saved to
 
 Right-click a conversation for the same actions, with their shortcuts.
 
+### Several accounts
+
+Click the account under "Mail" in the sidebar and choose **Add account…**
+to sign in to another Gmail account in your browser. With more than one,
+the sidebar says **All**: the inbox and the other mailboxes show every
+account's mail, newest first, and labels are listed under each address.
+The same menu narrows the window to one account. Triage, replies and
+attachments always go through the account a conversation belongs to, and a
+new message comes from the account shown (the first one when all are).
+
+The sidebar shows each account's Google profile photo. Accounts signed in
+before Mail asked to see it show their initial until you sign in to them
+again: **Add account…** and pick the same account.
+
 Triage applies locally at once and waits in a queue until the next sync sends
 it to Gmail, so it works offline too.
 
@@ -139,8 +153,10 @@ mail (CLI, agent CLI, window)  →  mail-core: auth · gmail · sync · store
                                     OAuth + PKCE    Gmail API    SQLite + FTS5
 ```
 
-- **Gmail API with OAuth.** PKCE and a loopback redirect, with the refresh
-  token in the macOS Keychain. Mail never sees your password.
+- **Gmail API with OAuth.** PKCE and a loopback redirect, with each
+  account's refresh token in the macOS Keychain. Mail never sees your
+  password. Besides Gmail it asks only for your name and profile photo, for
+  the account menu.
 - **Sync.** The first run downloads the last 90 days, paced to Gmail's quota
   (about 100 full messages a minute). Past 300 messages it stores headers
   first, three times faster, so the mailbox is usable sooner, then fills in
@@ -184,7 +200,8 @@ keyboard handling gets checked without a person at the keyboard.
 ## Privacy
 
 Your mail stays on your Mac and with Google. Mail has no server, no
-analytics and no telemetry. The database lives in
+analytics and no telemetry. Profile photos are saved next to the database.
+The database lives in
 `~/Library/Application Support/org.erlin.mail/`; delete that folder and the
 Keychain item (`security delete-generic-password -s org.erlin.mail`) to
 remove everything.

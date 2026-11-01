@@ -12,6 +12,8 @@ use mail_core::{
 };
 
 pub const ADDRESS: &str = "you@example.com";
+/// A second, smaller account, so the demo shows several accounts.
+pub const WORK_ADDRESS: &str = "you@studio.example";
 
 const HOUR: i64 = 3_600_000;
 
@@ -153,10 +155,67 @@ const NEWSLETTER_HTML: &str = r#"<!DOCTYPE html>
 <p><a href="https://rustweekly.example/unsubscribe">Unsubscribe</a></p>
 </body></html>"#;
 
+const WORK_MAILBOX: &[Mail] = &[
+    Mail {
+        thread: "w-onboarding",
+        hours_ago: 2,
+        from: ("Lena Brandt", "lena@studio.example"),
+        subject: "Comments on the onboarding flow",
+        body: "Left a few comments on the second and third screens. The copy is close; the empty state needs one more pass.\n\nCan we look at it together tomorrow morning?",
+        labels: &["INBOX", "UNREAD", "Label_clients"],
+        attachment: None,
+        html: None,
+    },
+    Mail {
+        thread: "w-standup",
+        hours_ago: 8,
+        from: ("Omar Haddad", "omar@studio.example"),
+        subject: "Standup moves to 10:30",
+        body: "From Monday, standup is at 10:30 so the Lisbon folks can join. Same room, same link.",
+        labels: &["INBOX", "UNREAD"],
+        attachment: None,
+        html: None,
+    },
+    Mail {
+        thread: "w-invoice",
+        hours_ago: 30,
+        from: ("Ledgerly", "billing@ledgerly.example"),
+        subject: "Invoice 2026-114 paid",
+        body: "Thanks! We received your payment for invoice 2026-114.",
+        labels: &["INBOX"],
+        attachment: None,
+        html: None,
+    },
+];
+
 /// Fills a new database at `path` with the made-up mailbox.
 pub fn seed(path: &Path) -> anyhow::Result<()> {
+    let labels = [
+        ("Label_receipts", "Receipts"),
+        ("Label_travel", "Travel"),
+        ("Label_work", "Work"),
+    ];
+    seed_account(path, ADDRESS, MAILBOX, &labels)
+}
+
+/// Adds the second made-up account to a database [`seed`] filled.
+pub fn seed_work(path: &Path) -> anyhow::Result<()> {
+    seed_account(
+        path,
+        WORK_ADDRESS,
+        WORK_MAILBOX,
+        &[("Label_clients", "Clients")],
+    )
+}
+
+fn seed_account(
+    path: &Path,
+    address: &str,
+    mailbox: &[Mail],
+    user_labels: &[(&str, &str)],
+) -> anyhow::Result<()> {
     let mut store = Store::open(path)?;
-    let account = store.add_account(ADDRESS)?;
+    let account = store.add_account(address)?;
     let system = [
         "INBOX",
         "STARRED",
@@ -175,11 +234,7 @@ pub fn seed(path: &Path) -> anyhow::Result<()> {
             kind: LabelKind::System,
         })
         .collect();
-    for (id, name) in [
-        ("Label_receipts", "Receipts"),
-        ("Label_travel", "Travel"),
-        ("Label_work", "Work"),
-    ] {
+    for &(id, name) in user_labels {
         labels.push(Label {
             id: id.into(),
             name: name.into(),
@@ -192,7 +247,7 @@ pub fn seed(path: &Path) -> anyhow::Result<()> {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
         .unwrap_or_default();
-    let messages: Vec<Message> = MAILBOX
+    let messages: Vec<Message> = mailbox
         .iter()
         .enumerate()
         .map(|(index, mail)| Message {
@@ -202,10 +257,10 @@ pub fn seed(path: &Path) -> anyhow::Result<()> {
             subject: mail.subject.into(),
             from_name: mail.from.0.into(),
             from_addr: mail.from.1.into(),
-            to: if mail.from.1 == ADDRESS {
+            to: if mail.from.1 == address {
                 "Sam Okafor <sam@buildkite.test>".into()
             } else {
-                format!("You <{ADDRESS}>")
+                format!("You <{address}>")
             },
             snippet: mail
                 .body

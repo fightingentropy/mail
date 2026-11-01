@@ -3,6 +3,7 @@
 //! sync thread, it ends with the window.
 
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -15,7 +16,7 @@ use mail_core::{
     paths::{self, Paths},
 };
 
-use super::background;
+use crate::accounts;
 
 pub enum Event {
     /// Saved at `path`, which may have a number added to the name.
@@ -29,6 +30,8 @@ pub enum Event {
 }
 
 struct Job {
+    /// The address of the account the message belongs to.
+    account: String,
     message_id: String,
     attachment: Attachment,
 }
@@ -51,8 +54,9 @@ impl Downloader {
     }
 
     /// Queues a download. Downloads run one at a time, in order.
-    pub fn download(&self, message_id: String, attachment: Attachment) {
+    pub fn download(&self, account: String, message_id: String, attachment: Attachment) {
         let _ = self.jobs.send(Job {
+            account,
             message_id,
             attachment,
         });
@@ -63,13 +67,13 @@ fn run(paths: Paths, jobs: Receiver<Job>, events: Sender<Event>, wake: impl Fn()
     // A Gmail client of its own: the sync thread's may be busy with a long
     // sync. Each paces itself; an attachment costs 20 quota units, a third
     // of a message.
-    let mut gmail: Option<GmailClient> = None;
+    let mut clients: HashMap<String, GmailClient> = HashMap::new();
     for job in jobs {
-        let event = match download(&paths, &mut gmail, &job) {
+        let event = match download(&paths, &mut clients, &job) {
             Ok(path) => Event::Saved { path },
             Err(error) => {
                 // Connect afresh next time: the token may have changed.
-                gmail = None;
+                clients.remove(&job.account);
                 Event::Failed {
                     filename: job.attachment.filename.clone(),
                     error: format!("{error:#}"),
@@ -83,11 +87,15 @@ fn run(paths: Paths, jobs: Receiver<Job>, events: Sender<Event>, wake: impl Fn()
     }
 }
 
-fn download(paths: &Paths, gmail: &mut Option<GmailClient>, job: &Job) -> anyhow::Result<PathBuf> {
-    if gmail.is_none() {
-        *gmail = Some(background::connect(paths)?.1);
+fn download(
+    paths: &Paths,
+    clients: &mut HashMap<String, GmailClient>,
+    job: &Job,
+) -> anyhow::Result<PathBuf> {
+    if !clients.contains_key(&job.account) {
+        clients.insert(job.account.clone(), accounts::client(paths, &job.account)?);
     }
-    let gmail = gmail.as_ref().expect("connected above");
+    let gmail = &clients[&job.account];
     let bytes = attachments::fetch(gmail, &job.message_id, &job.attachment)?;
     let folder = paths::downloads()?;
     attachments::save(&folder, &job.attachment.filename, &bytes)

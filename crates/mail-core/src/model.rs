@@ -3,6 +3,8 @@
 /// A conversation as the thread list shows it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThreadSummary {
+    /// The account the thread belongs to.
+    pub account_id: i64,
     pub thread_id: String,
     /// Unix milliseconds of the newest message.
     pub last_date: i64,

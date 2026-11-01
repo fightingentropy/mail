@@ -3,6 +3,7 @@
 //! `mail` with no command opens the window. The commands sign in, sync and
 //! search from the terminal, and `mail agent` serves coding agents.
 
+mod accounts;
 mod agent;
 mod commands;
 mod dates;

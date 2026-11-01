@@ -12,16 +12,15 @@ use std::{
 use anyhow::Context;
 use clap::Args;
 use mail_core::{
-    auth::{self, OAuthClient, keychain},
+    auth::OAuthClient,
     compose::{self, Draft},
-    gmail::{self, GmailApi, GmailClient},
     model::{Account, Label},
     paths::Paths,
     store::{Order, SearchQuery, Store},
     sync::{self, Progress, SyncKind, SyncOptions},
 };
 
-use crate::dates;
+use crate::{accounts, dates};
 
 pub fn auth(paths: &Paths, client_file: Option<&Path>) -> anyhow::Result<()> {
     let client = match client_file {
@@ -49,34 +48,40 @@ pub fn auth(paths: &Paths, client_file: Option<&Path>) -> anyhow::Result<()> {
     println!(
         "Opening Google sign-in in your browser. Waiting for you to finish there (Ctrl-C to cancel)…"
     );
-    let sign_in = auth::sign_in(&gmail::http_agent(), &client, |url| {
+    let email = accounts::sign_in(paths, client, |url| {
         let opened = process::Command::new("open").arg(url).status();
         if !opened.is_ok_and(|status| status.success()) {
             println!("Open this link to sign in:\n{url}");
         }
         Ok(())
     })?;
-
-    let gmail = GmailClient::new(client, sign_in.refresh_token.clone(), Some(sign_in.access));
-    let profile = gmail.profile()?;
-    Store::open(&paths.database())?.add_account(&profile.email_address)?;
-    keychain::save(&profile.email_address, &sign_in.refresh_token)?;
-    println!(
-        "Signed in as {}. Run `mail sync` to download your mail.",
-        profile.email_address
-    );
+    println!("Signed in as {email}. Run `mail sync` to download your mail.");
     Ok(())
 }
 
+/// Syncs every signed-in account, one after another.
 pub fn sync(paths: &Paths, days: u32) -> anyhow::Result<()> {
     let mut store = Store::open(&paths.database())?;
-    let account = signed_in(&store)?;
-    let gmail = GmailClient::new(
-        OAuthClient::load(&paths.oauth_client())?,
-        keychain::load(&account.email)?,
-        None,
-    );
+    let accounts = store.accounts()?;
+    if accounts.is_empty() {
+        signed_in(&store)?;
+    }
+    for account in &accounts {
+        if accounts.len() > 1 {
+            println!("{}", account.email);
+        }
+        sync_account(paths, &mut store, account, days)?;
+    }
+    Ok(())
+}
 
+fn sync_account(
+    paths: &Paths,
+    store: &mut Store,
+    account: &Account,
+    days: u32,
+) -> anyhow::Result<()> {
+    let gmail = accounts::client(paths, &account.email)?;
     let started = Instant::now();
     let show_progress = std::io::stderr().is_terminal();
     let options = SyncOptions {
@@ -111,14 +116,19 @@ pub fn sync(paths: &Paths, days: u32) -> anyhow::Result<()> {
         let _ = std::io::stderr().flush();
     };
 
-    let report = sync::sync(&mut store, &gmail, &account, &options, &mut show)?;
+    let report = sync::sync(store, &gmail, account, &options, &mut show)?;
     // A big first sync stores headers first; keep going until every body is
     // here. Each round is short, and Ctrl-C leaves the rest for next time.
     let mut filled = report.bodies_filled;
     let mut pending = report.bodies_pending;
     while pending > 0 {
-        let account = signed_in(&store)?;
-        let next = sync::sync(&mut store, &gmail, &account, &options, &mut show)?;
+        // Read the account again: the sync point moved.
+        let account = store
+            .accounts()?
+            .into_iter()
+            .find(|stored| stored.id == account.id)
+            .context("The account went away during sync")?;
+        let next = sync::sync(store, &gmail, &account, &options, &mut show)?;
         filled += next.bodies_filled;
         pending = next.bodies_pending;
         if next.bodies_filled == 0 {
@@ -425,11 +435,7 @@ pub(crate) fn save_draft(
     account: &Account,
     draft: &Draft,
 ) -> anyhow::Result<String> {
-    let gmail = GmailClient::new(
-        OAuthClient::load(&paths.oauth_client())?,
-        keychain::load(&account.email)?,
-        None,
-    );
+    let gmail = accounts::client(paths, &account.email)?;
     compose::save(&gmail, &account.email, draft, None)
 }
 

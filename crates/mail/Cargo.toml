@@ -24,8 +24,8 @@ jiff = "0.2"
 # The window. OpenGL only; persistence remembers the window's size and place.
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "persistence"] }
 egui = "0.36"
-# Saves demo screenshots for the README and visual checks.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Saves demo screenshots, and decodes profile photos (JPEG or WebP from Google).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
 [dev-dependencies]
 tempfile = "3"

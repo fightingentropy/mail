@@ -22,6 +22,9 @@ use crate::{
 };
 
 const API: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
+const USERINFO: &str = "https://www.googleapis.com/oauth2/v3/userinfo";
+/// Google serves profile photos only from here; any other address is ignored.
+const PHOTO_HOST: &str = "https://lh3.googleusercontent.com/";
 const MAX_ATTEMPTS: u32 = 8;
 
 /// Gmail allows 6,000 quota units per user per minute. Spacing requests
@@ -82,6 +85,50 @@ impl GmailClient {
 
     fn forget_access_token(&self) {
         *self.access.lock().unwrap() = None;
+    }
+
+    /// Your Google profile photo as image bytes (usually JPEG). `None` when
+    /// the sign-in didn't include [`auth::PROFILE_SCOPE`] or there is no
+    /// photo. Costs no Gmail quota.
+    pub fn profile_photo(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        #[derive(Deserialize)]
+        struct UserInfo {
+            picture: Option<String>,
+        }
+        let authorization = format!("Bearer {}", self.access_token()?);
+        let mut response = self
+            .http
+            .get(USERINFO)
+            .header("Authorization", &authorization)
+            .call()
+            .context("Could not reach Google")?;
+        // 401 or 403: this sign-in may not see the profile.
+        if response.status() != 200 {
+            return Ok(None);
+        }
+        let info: UserInfo = response.body_mut().read_json()?;
+        let Some(picture) = info.picture.filter(|url| url.starts_with(PHOTO_HOST)) else {
+            return Ok(None);
+        };
+        // The URL ends in a size such as "=s96-c"; ask for one sharp on Retina.
+        let url = match picture.rsplit_once('=') {
+            Some((base, _)) => format!("{base}=s256-c"),
+            None => picture,
+        };
+        let mut photo = self
+            .http
+            .get(&url)
+            .call()
+            .context("Could not download the profile photo")?;
+        if photo.status() != 200 {
+            return Ok(None);
+        }
+        let bytes = photo
+            .body_mut()
+            .with_config()
+            .limit(5 * 1024 * 1024)
+            .read_to_vec()?;
+        Ok(Some(bytes))
     }
 
     /// GETs `path` under the user's mailbox. `None` means 404.

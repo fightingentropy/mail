@@ -27,6 +27,8 @@ pub enum Field {
 
 pub struct Compose {
     pub title: &'static str,
+    /// The address of the account it is written from.
+    pub from: String,
     pub to: String,
     pub cc: String,
     pub subject: String,
@@ -46,8 +48,8 @@ pub struct Compose {
 }
 
 impl Compose {
-    pub fn new_message() -> Self {
-        Self::from_draft("New message", Draft::default(), Field::To)
+    pub fn new_message(from: &str) -> Self {
+        Self::from_draft("New message", from, Draft::default(), Field::To)
     }
 
     /// A reply to `message`, or to everyone on it with `all`.
@@ -55,12 +57,13 @@ impl Compose {
         let date = dates::human(message.internal_date);
         let draft = Draft::reply(message, own_address, all, &date);
         let title = if all { "Reply all" } else { "Reply" };
-        Self::from_draft(title, draft, Field::Body)
+        Self::from_draft(title, own_address, draft, Field::Body)
     }
 
-    fn from_draft(title: &'static str, draft: Draft, focus: Field) -> Self {
+    fn from_draft(title: &'static str, from: &str, draft: Draft, focus: Field) -> Self {
         Self {
             title,
+            from: from.to_owned(),
             to: draft.to.clone(),
             cc: draft.cc.clone(),
             subject: draft.subject.clone(),
@@ -135,7 +138,8 @@ impl Compose {
 
 /// Draws the panel. Typing goes straight into the fields; shortcuts are
 /// handled in `keys.rs`, and the footer shows the ones in effect.
-pub fn draw(ui: &mut egui::Ui, compose: &mut Compose, keymap: &Keymap) {
+/// `several_accounts` adds a From line, so you can see which account writes.
+pub fn draw(ui: &mut egui::Ui, compose: &mut Compose, keymap: &Keymap, several_accounts: bool) {
     let palette = theme::palette(ui.ctx());
     let side = ((ui.available_width() - READING_WIDTH) / 2.0).clamp(36.0, 120.0) as i8;
     egui::Frame::new()
@@ -148,6 +152,13 @@ pub fn draw(ui: &mut egui::Ui, compose: &mut Compose, keymap: &Keymap) {
         .show(ui, |ui| {
             ui.set_max_width(ui.available_width().min(READING_WIDTH));
             ui.label(RichText::new(compose.title).font(theme::semibold(22.0)));
+            if several_accounts {
+                ui.label(
+                    RichText::new(format!("From {}", compose.from))
+                        .font(theme::regular(13.5))
+                        .color(palette.dim),
+                );
+            }
             ui.add_space(14.0);
 
             let focus = compose.focus.take();

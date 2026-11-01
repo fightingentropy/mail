@@ -6,9 +6,12 @@ use egui::{
     Stroke, TextEdit, Vec2,
     text::{LayoutJob, TextFormat, TextWrapping},
 };
-use std::{ops::Range, path::PathBuf};
+use std::{collections::HashMap, fs, ops::Range, path::PathBuf};
 
-use mail_core::model::{Attachment, Message, ThreadSummary};
+use mail_core::{
+    model::{Attachment, LabelKind, Message, ThreadSummary},
+    paths::Paths,
+};
 
 use super::{
     compose,
@@ -21,7 +24,7 @@ use super::{
 use crate::dates;
 
 const ROW_HEIGHT: f32 = 74.0;
-const SIDEBAR_WIDTH: f32 = 212.0;
+const SIDEBAR_WIDTH: f32 = 228.0;
 const LIST_WIDTH: f32 = 440.0;
 const READING_WIDTH: f32 = 760.0;
 
@@ -39,6 +42,9 @@ pub struct Screen {
     /// Where Settings saves changed shortcuts.
     shortcuts_path: PathBuf,
     settings: Option<Settings>,
+    paths: Paths,
+    /// Profile photos by address, loaded once; `None` when there is none.
+    photos: HashMap<String, Option<egui::TextureHandle>>,
     search_text: String,
     focus_search: bool,
     search_focused: bool,
@@ -52,11 +58,14 @@ pub struct Screen {
 }
 
 impl Screen {
-    pub fn new(status: SyncStatus, shortcuts_path: PathBuf) -> Self {
+    pub fn new(status: SyncStatus, paths: Paths) -> Self {
+        let shortcuts_path = paths.root.join("shortcuts.json");
         Self {
             keys: Keys::new(Keymap::load(&shortcuts_path)),
             shortcuts_path,
             settings: None,
+            paths,
+            photos: HashMap::new(),
             search_text: String::new(),
             focus_search: false,
             search_focused: false,
@@ -69,6 +78,35 @@ impl Screen {
             sync_requested: false,
         }
     }
+
+    /// Loads the photo again next time it is drawn, after it was saved.
+    pub fn forget_photo(&mut self, email: &str) {
+        self.photos.remove(email);
+    }
+
+    fn photo(&mut self, ctx: &egui::Context, email: &str) -> Option<&egui::TextureHandle> {
+        if !self.photos.contains_key(email) {
+            let texture = load_photo(ctx, &self.paths, email);
+            self.photos.insert(email.to_owned(), texture);
+        }
+        self.photos.get(email)?.as_ref()
+    }
+}
+
+/// Decodes a saved photo into a texture, scaled for a sharp small circle.
+fn load_photo(ctx: &egui::Context, paths: &Paths, email: &str) -> Option<egui::TextureHandle> {
+    let bytes = fs::read(paths.photo(email)).ok()?;
+    let photo = image::load_from_memory(&bytes).ok()?;
+    let photo = photo
+        .resize_to_fill(128, 128, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
+    let size = [photo.width() as usize, photo.height() as usize];
+    let pixels = egui::ColorImage::from_rgba_unmultiplied(size, photo.as_raw());
+    Some(ctx.load_texture(
+        format!("photo:{email}"),
+        pixels,
+        egui::TextureOptions::LINEAR,
+    ))
 }
 
 pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
@@ -96,7 +134,7 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
                 .fill(palette.sidebar)
                 .inner_margin(Margin::symmetric(12, 20)),
         )
-        .show(ui, |ui| sidebar(ui, model, &mut actions));
+        .show(ui, |ui| sidebar(ui, model, screen, &mut actions));
     egui::Panel::left("threads")
         .exact_size(LIST_WIDTH)
         .resizable(false)
@@ -109,7 +147,10 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(palette.background))
         .show(ui, |ui| match &mut model.compose {
-            Some(compose) => compose::draw(ui, compose, &screen.keys.keymap),
+            Some(compose) => {
+                let several = model.accounts.len() > 1;
+                compose::draw(ui, compose, &screen.keys.keymap, several)
+            }
             None => reader(ui, model, screen, &mut actions),
         });
 
@@ -218,18 +259,9 @@ fn search_id() -> Id {
 
 // Sidebar
 
-fn sidebar(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
+fn sidebar(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut Vec<Action>) {
     let palette = theme::palette(ui.ctx());
-    ui.label(
-        RichText::new("Mail")
-            .font(theme::semibold(21.0))
-            .color(palette.text),
-    );
-    ui.label(
-        RichText::new(&model.account.email)
-            .font(theme::regular(13.0))
-            .color(palette.dim),
-    );
+    account_header(ui, model, screen, actions);
     ui.add_space(22.0);
 
     let current = match &model.view {
@@ -237,35 +269,307 @@ fn sidebar(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
         View::Search(_) => None,
     };
     for (id, name) in MAILBOXES {
-        let count = (*id == "INBOX")
-            .then(|| model.unread.get(*id).copied())
-            .flatten();
+        let count = (*id == "INBOX").then(|| model.unread(id));
         if nav_item(ui, name, count, current == Some(id)) {
             actions.push(Action::Show((*id).into()));
         }
     }
 
-    let user_labels: Vec<_> = model
-        .labels
-        .iter()
-        .filter(|label| label.kind == mail_core::model::LabelKind::User)
+    // With every account shown, each account's labels sit under its address;
+    // choosing one shows that account.
+    let grouped = model.scope.is_none() && model.accounts.len() > 1;
+    let groups: Vec<_> = model
+        .shown_accounts()
+        .map(|account| {
+            let labels: Vec<_> = model
+                .labels(account.id)
+                .iter()
+                .filter(|label| label.kind == LabelKind::User)
+                .collect();
+            (account, labels)
+        })
+        .filter(|(_, labels)| !labels.is_empty())
         .collect();
-    if !user_labels.is_empty() {
-        ui.add_space(20.0);
-        ui.label(
-            RichText::new("LABELS")
-                .font(theme::medium(11.5))
-                .color(palette.dim),
-        );
-        ui.add_space(4.0);
-        ScrollArea::vertical().id_salt("labels").show(ui, |ui| {
-            for label in user_labels {
-                let count = model.unread.get(&label.id).copied();
-                if nav_item(ui, &label.name, count, current == Some(label.id.as_str())) {
+    if groups.is_empty() {
+        return;
+    }
+    ui.add_space(20.0);
+    ui.label(
+        RichText::new("LABELS")
+            .font(theme::medium(11.5))
+            .color(palette.dim),
+    );
+    ui.add_space(4.0);
+    ScrollArea::vertical().id_salt("labels").show(ui, |ui| {
+        for (account, labels) in groups {
+            if grouped {
+                ui.add_space(6.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&account.email)
+                            .font(theme::regular(12.5))
+                            .color(palette.dim),
+                    )
+                    .truncate(),
+                );
+            }
+            for label in labels {
+                let count = Some(model.unread_in(account.id, &label.id));
+                let selected = !grouped && current == Some(label.id.as_str());
+                if nav_item(ui, &label.name, count, selected) {
+                    if grouped {
+                        actions.push(Action::SetScope(Some(account.id)));
+                    }
                     actions.push(Action::Show(label.id.clone()));
                 }
             }
+        }
+    });
+}
+
+/// Your photo, "Mail", and the account shown: an address, or "All" when
+/// several accounts are. Clicking the account opens a menu of them.
+fn account_header(
+    ui: &mut egui::Ui,
+    model: &Model,
+    screen: &mut Screen,
+    actions: &mut Vec<Action>,
+) {
+    let palette = theme::palette(ui.ctx());
+    let several = model.accounts.len() > 1;
+    let shown = model.scope.and_then(|id| model.account(id));
+    let photo_of = shown
+        .or(model.accounts.first())
+        .map(|account| account.email.clone());
+    let name = match shown {
+        Some(account) => account.email.clone(),
+        None if several => "All".to_owned(),
+        None => model
+            .accounts
+            .first()
+            .map(|account| account.email.clone())
+            .unwrap_or_default(),
+    };
+
+    let mut opener = None;
+    ui.horizontal(|ui| {
+        let size = 38.0;
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+        if let Some(email) = &photo_of {
+            paint_avatar(ui, screen, email, rect);
+        }
+        ui.vertical(|ui| {
+            ui.add_space(1.0);
+            ui.label(
+                RichText::new("Mail")
+                    .font(theme::semibold(19.0))
+                    .color(palette.text),
+            );
+            opener = Some(account_button(ui, &name));
         });
+    });
+    let Some(opener) = opener else { return };
+    egui::Popup::menu(&opener)
+        .width(260.0)
+        .gap(6.0)
+        .show(|ui| account_menu(ui, model, screen, actions));
+}
+
+/// The account's name with a chevron, as one clickable thing.
+fn account_button(ui: &mut egui::Ui, name: &str) -> egui::Response {
+    let palette = theme::palette(ui.ctx());
+    let chevron = 12.0;
+    let max_text = (ui.available_width() - chevron - 6.0).max(20.0);
+    let galley = one_line(
+        ui,
+        &[(name.to_owned(), theme::regular(13.0), palette.dim)],
+        max_text,
+    );
+    let size = Vec2::new(galley.size().x + 6.0 + chevron, galley.size().y.max(18.0));
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let color = if response.hovered() {
+        palette.secondary
+    } else {
+        palette.dim
+    };
+    let text_at = Pos2::new(rect.left(), rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(text_at, galley, color);
+    // Inter has no ▾, so the chevron is two short strokes.
+    let center = Pos2::new(rect.right() - chevron / 2.0, rect.center().y + 1.0);
+    let stroke = Stroke::new(1.4, color);
+    ui.painter().line_segment(
+        [center + Vec2::new(-3.5, -2.0), center + Vec2::new(0.0, 1.5)],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [center + Vec2::new(0.0, 1.5), center + Vec2::new(3.5, -2.0)],
+        stroke,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn account_menu(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut Vec<Action>) {
+    let mut chosen = None;
+    if model.accounts.len() > 1 {
+        let emails: Vec<&str> = model
+            .accounts
+            .iter()
+            .map(|account| account.email.as_str())
+            .collect();
+        let count: usize = model
+            .accounts
+            .iter()
+            .map(|account| model.unread_in(account.id, "INBOX"))
+            .sum();
+        if account_row(
+            ui,
+            screen,
+            &emails,
+            "All accounts",
+            count,
+            model.scope.is_none(),
+        ) {
+            chosen = Some(Action::SetScope(None));
+        }
+    }
+    for account in &model.accounts {
+        let count = model.unread_in(account.id, "INBOX");
+        let selected = model.scope == Some(account.id) || model.accounts.len() == 1;
+        if account_row(
+            ui,
+            screen,
+            &[&account.email],
+            &account.email,
+            count,
+            selected,
+        ) {
+            chosen = Some(Action::SetScope(Some(account.id)));
+        }
+    }
+    ui.separator();
+    if add_account_row(ui) {
+        chosen = Some(Action::AddAccount);
+    }
+    if let Some(action) = chosen {
+        actions.push(action);
+        ui.close();
+    }
+}
+
+/// One row of the account menu: photos, a name and the unread count in the
+/// inbox. Returns true when clicked.
+fn account_row(
+    ui: &mut egui::Ui,
+    screen: &mut Screen,
+    photos: &[&str],
+    name: &str,
+    unread: usize,
+    selected: bool,
+) -> bool {
+    let palette = theme::palette(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
+    if selected {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), palette.selected);
+    } else if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), palette.hover);
+    }
+    // Several photos overlap a little, the first on top.
+    let size = 24.0;
+    let left = rect.left() + 8.0;
+    for (index, email) in photos.iter().take(3).enumerate().rev() {
+        let at = Pos2::new(left + index as f32 * 12.0, rect.center().y - size / 2.0);
+        let circle = egui::Rect::from_min_size(at, Vec2::splat(size));
+        if photos.len() > 1 {
+            ui.painter()
+                .circle_filled(circle.center(), size / 2.0 + 1.5, palette.overlay);
+        }
+        paint_avatar(ui, screen, email, circle);
+    }
+    let text_left = left + size + 12.0 * (photos.len().min(3) - 1) as f32 + 10.0;
+    let count_width = if unread > 0 { 34.0 } else { 0.0 };
+    let name = one_line(
+        ui,
+        &[(name.to_owned(), theme::regular(14.5), palette.text)],
+        rect.right() - text_left - count_width - 8.0,
+    );
+    let name_at = Pos2::new(text_left, rect.center().y - name.size().y / 2.0);
+    ui.painter().galley(name_at, name, palette.text);
+    if unread > 0 {
+        ui.painter().text(
+            Pos2::new(rect.right() - 10.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            unread.to_string(),
+            theme::medium(13.0),
+            palette.accent,
+        );
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+/// "Add account…", lined up with the account rows. Returns true when clicked.
+fn add_account_row(ui: &mut egui::Ui) -> bool {
+    let palette = theme::palette(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), palette.hover);
+    }
+    let center = Pos2::new(rect.left() + 20.0, rect.center().y);
+    ui.painter()
+        .circle_stroke(center, 11.5, Stroke::new(1.0, palette.dim));
+    let plus = Stroke::new(1.4, palette.secondary);
+    ui.painter().line_segment(
+        [center - Vec2::new(5.0, 0.0), center + Vec2::new(5.0, 0.0)],
+        plus,
+    );
+    ui.painter().line_segment(
+        [center - Vec2::new(0.0, 5.0), center + Vec2::new(0.0, 5.0)],
+        plus,
+    );
+    ui.painter().text(
+        Pos2::new(rect.left() + 42.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Add account…",
+        theme::regular(14.5),
+        palette.text,
+    );
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+/// A round profile photo, or the address's first letter when there is none.
+fn paint_avatar(ui: &egui::Ui, screen: &mut Screen, email: &str, rect: egui::Rect) {
+    let palette = theme::palette(ui.ctx());
+    let radius = rect.width() / 2.0;
+    match screen.photo(ui.ctx(), email) {
+        Some(texture) => {
+            egui::Image::new((texture.id(), rect.size()))
+                .corner_radius(CornerRadius::same(radius.round() as u8))
+                .paint_at(ui, rect);
+        }
+        None => {
+            ui.painter()
+                .circle_filled(rect.center(), radius, palette.selected);
+            let initial = email
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_default();
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                initial,
+                theme::semibold(radius * 0.95),
+                palette.text,
+            );
+        }
     }
 }
 
@@ -449,8 +753,8 @@ fn view_title(model: &Model) -> String {
             .map(|(_, name)| (*name).to_owned())
             .or_else(|| {
                 model
-                    .labels
-                    .iter()
+                    .shown_accounts()
+                    .flat_map(|account| model.labels(account.id))
                     .find(|label| &label.id == id)
                     .map(|label| label.name.clone())
             })
@@ -671,10 +975,11 @@ fn reader(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut V
                     )
                     .wrap(),
                 );
+                let own_address = model.own_address(open.account_id);
                 let labels: Vec<&str> = model
-                    .labels
+                    .labels(open.account_id)
                     .iter()
-                    .filter(|label| label.kind == mail_core::model::LabelKind::User)
+                    .filter(|label| label.kind == LabelKind::User)
                     .filter(|label| open.messages.iter().any(|m| m.has_label(&label.id)))
                     .map(|label| label.name.as_str())
                     .collect();
@@ -691,9 +996,9 @@ fn reader(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut V
                 for (index, message) in open.messages.iter().enumerate() {
                     let expanded = open.expanded.get(index).copied().unwrap_or(true);
                     let toggled = if expanded {
-                        expanded_message(ui, index, message, &model.account.email, actions)
+                        expanded_message(ui, index, message, own_address, actions)
                     } else {
-                        collapsed_message(ui, message, &model.account.email)
+                        collapsed_message(ui, message, own_address)
                     };
                     if toggled && open.messages.len() > 1 {
                         actions.push(Action::ToggleExpanded(index));
@@ -1018,7 +1323,7 @@ fn status_bar(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &m
                 };
                 (format!("Sync failed: {error}{waiting}"), palette.danger)
             }
-            SyncStatus::Idle => match model.account.synced_at {
+            SyncStatus::Idle => match model.synced_at() {
                 Some(at) => (format!("Synced {}", dates::short(at)), palette.dim),
                 None => ("Not synced yet".to_owned(), palette.dim),
             },
@@ -1208,4 +1513,27 @@ pub(super) fn overlay_frame(palette: &Palette) -> egui::Frame {
         .stroke(Stroke::new(1.0, palette.divider))
         .corner_radius(CornerRadius::same(12))
         .inner_margin(Margin::same(22))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_saved_photo_becomes_a_small_square_texture() {
+        let folder = tempfile::tempdir().unwrap();
+        let paths = Paths::under(folder.path());
+        let ctx = egui::Context::default();
+        assert!(load_photo(&ctx, &paths, "me@example.com").is_none());
+
+        // Google sends JPEGs, often not square.
+        let photo = image::RgbImage::from_pixel(300, 200, image::Rgb([200, 40, 40]));
+        let path = paths.photo("me@example.com");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        photo
+            .save_with_format(&path, image::ImageFormat::Jpeg)
+            .unwrap();
+        let texture = load_photo(&ctx, &paths, "Me@Example.com").expect("decodes");
+        assert_eq!(texture.size(), [128, 128]);
+    }
 }

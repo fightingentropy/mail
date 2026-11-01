@@ -10,8 +10,17 @@ fn model() -> (Model, tempfile::TempDir) {
     let path = folder.path().join("mail.sqlite3");
     demo::seed(&path).unwrap();
     let store = Store::open(&path).unwrap();
-    let account = store.account().unwrap().unwrap();
-    (Model::new(store, account).unwrap(), folder)
+    (Model::new(store).unwrap(), folder)
+}
+
+/// The demo mailbox plus a second, smaller account.
+fn two_accounts() -> (Model, tempfile::TempDir) {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("mail.sqlite3");
+    demo::seed(&path).unwrap();
+    demo::seed_work(&path).unwrap();
+    let store = Store::open(&path).unwrap();
+    (Model::new(store).unwrap(), folder)
 }
 
 fn subjects(model: &Model) -> Vec<&str> {
@@ -32,7 +41,7 @@ fn opens_on_the_inbox_with_the_newest_thread_selected() {
         "Next steps: senior full-stack engineer"
     );
     assert_eq!(model.open.as_ref().unwrap().messages.len(), 1);
-    assert_eq!(model.unread.get("INBOX"), Some(&3));
+    assert_eq!(model.unread("INBOX"), 3);
 }
 
 #[test]
@@ -259,9 +268,17 @@ fn unsaved_edits_keep_the_panel_open_until_saved_or_discarded() {
     assert!(model.notice().unwrap().starts_with("Not saved yet"));
 
     model.apply(Action::SaveDraft).unwrap();
-    let [Effect::SaveDraft { draft, draft_id }] = model.effects.as_slice() else {
+    let [
+        Effect::SaveDraft {
+            from,
+            draft,
+            draft_id,
+        },
+    ] = model.effects.as_slice()
+    else {
         panic!("expected one save, got {:?}", model.effects);
     };
+    assert_eq!(from, demo::ADDRESS);
     assert_eq!(draft.to, "maya@fastmail.test");
     assert_eq!(*draft_id, None);
     model.apply(Action::SaveDraft).unwrap();
@@ -290,7 +307,13 @@ fn unsaved_edits_keep_the_panel_open_until_saved_or_discarded() {
 
     model.apply(Action::DiscardDraft).unwrap();
     assert!(model.compose.is_none());
-    assert_eq!(model.effects, [Effect::DiscardDraft("draft-9".into())]);
+    assert_eq!(
+        model.effects,
+        [Effect::DiscardDraft {
+            from: demo::ADDRESS.into(),
+            draft_id: "draft-9".into()
+        }]
+    );
 }
 
 fn select(model: &mut Model, subject: &str) {
@@ -314,6 +337,7 @@ fn clicking_an_attachment_asks_the_shell_to_download_it() {
         .unwrap();
     let [
         Effect::Download {
+            account,
             message_id,
             attachment,
         },
@@ -321,6 +345,7 @@ fn clicking_an_attachment_asks_the_shell_to_download_it() {
     else {
         panic!("expected one download, got {:?}", model.effects);
     };
+    assert_eq!(account, demo::ADDRESS);
     assert_eq!(
         message_id,
         &model.open.as_ref().unwrap().messages[0].gmail_id
@@ -410,6 +435,7 @@ fn confirming_sends_once_and_closes_on_success() {
         Effect::SendDraft {
             draft,
             draft_id: None,
+            ..
         },
     ] = model.effects.as_slice()
     else {
@@ -466,4 +492,92 @@ fn sending_needs_a_valid_recipient() {
     model.apply(Action::RequestSend).unwrap();
     assert!(model.confirm_send.is_none());
     assert!(model.notice().unwrap().starts_with("Not an email address"));
+}
+
+#[test]
+fn all_accounts_merge_newest_first_and_one_can_be_chosen() {
+    let (mut model, _folder) = two_accounts();
+    assert_eq!(model.accounts.len(), 2);
+    assert_eq!(model.scope, None);
+    // 8 threads in the first inbox, 3 in the second, by date across both.
+    assert_eq!(model.threads.len(), 11);
+    assert_eq!(
+        selected_subject(&model),
+        "Next steps: senior full-stack engineer"
+    );
+    assert_eq!(model.threads[1].subject, "Comments on the onboarding flow");
+    assert!(
+        model
+            .threads
+            .windows(2)
+            .all(|pair| pair[0].last_date >= pair[1].last_date)
+    );
+    assert_eq!(model.unread("INBOX"), 5);
+
+    let work = model.accounts[1].id;
+    model.apply(Action::SetScope(Some(work))).unwrap();
+    assert_eq!(model.threads.len(), 3);
+    assert!(model.threads.iter().all(|thread| thread.account_id == work));
+    assert_eq!(model.unread("INBOX"), 2);
+
+    model.apply(Action::SetScope(None)).unwrap();
+    assert_eq!(model.threads.len(), 11);
+}
+
+#[test]
+fn actions_go_to_the_account_the_thread_is_in() {
+    let (mut model, _folder) = two_accounts();
+    let work = model.accounts[1].id;
+    select(&mut model, "Standup moves to 10:30");
+    model.apply(Action::Archive).unwrap();
+    assert_eq!(model.store.pending_changes(work).unwrap().len(), 1);
+    let first = model.accounts[0].id;
+    assert!(model.store.pending_changes(first).unwrap().is_empty());
+
+    // Replies come from the address the thread was sent to.
+    select(&mut model, "Comments on the onboarding flow");
+    model.apply(Action::Reply).unwrap();
+    assert_eq!(model.compose.as_ref().unwrap().from, demo::WORK_ADDRESS);
+    assert_eq!(
+        model.compose.as_ref().unwrap().to,
+        "Lena Brandt <lena@studio.example>"
+    );
+    model.apply(Action::DiscardDraft).unwrap();
+
+    // The label picker offers the thread's own account's labels.
+    model.apply(Action::OpenPicker).unwrap();
+    let names: Vec<&str> = model
+        .picker_labels()
+        .iter()
+        .map(|l| l.name.as_str())
+        .collect();
+    assert_eq!(names, ["Clients"]);
+}
+
+#[test]
+fn a_label_belongs_to_one_account_so_all_returns_to_the_inbox() {
+    let (mut model, _folder) = two_accounts();
+    let work = model.accounts[1].id;
+    model.apply(Action::SetScope(Some(work))).unwrap();
+    model.apply(Action::Show("Label_clients".into())).unwrap();
+    assert_eq!(subjects(&model), ["Comments on the onboarding flow"]);
+
+    model.apply(Action::SetScope(None)).unwrap();
+    assert_eq!(model.view, View::Mailbox("INBOX".into()));
+
+    // Starred is shared by every account, so it stays.
+    model.apply(Action::Show("STARRED".into())).unwrap();
+    model.apply(Action::SetScope(Some(work))).unwrap();
+    assert_eq!(model.view, View::Mailbox("STARRED".into()));
+}
+
+#[test]
+fn new_mail_comes_from_the_account_shown() {
+    let (mut model, _folder) = two_accounts();
+    model.apply(Action::NewMessage).unwrap();
+    assert_eq!(model.compose.take().unwrap().from, demo::ADDRESS);
+    let work = model.accounts[1].id;
+    model.apply(Action::SetScope(Some(work))).unwrap();
+    model.apply(Action::NewMessage).unwrap();
+    assert_eq!(model.compose.take().unwrap().from, demo::WORK_ADDRESS);
 }

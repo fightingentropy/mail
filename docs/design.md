@@ -18,8 +18,7 @@ on purpose; the code and its comments carry the details.
   in the background when the app is closed.
 - **Small and readable.** Plain Rust, few dependencies, no framework magic.
 
-Not goals for v1: multiple accounts, non-Gmail providers, HTML rendering in
-the window (the browser shows a message's HTML on request), calendar or
+Not goals for v1: non-Gmail providers, HTML rendering in the window (the browser shows a message's HTML on request), calendar or
 contacts, a hosted service of any kind.
 
 ## Architecture
@@ -105,6 +104,20 @@ Sources: [OAuth 2.0 refresh token expiration](https://developers.google.com/iden
 5. The refresh token goes into the login Keychain (service `org.erlin.mail`,
    account = your address). Access tokens stay in memory and are refreshed
    when they expire or Gmail returns 401.
+6. With the token Mail asks Google's userinfo endpoint for the profile photo
+   (`userinfo.profile`, the only scope besides `gmail.modify`) and saves it
+   under `photos/`. The URL must be on `lh3.googleusercontent.com`.
+
+Signing in again to an account that is already there renews its token and
+photo. **Several accounts** came after v1: every table was keyed by account
+from the start, so the store only had to stop refusing a second one. The
+window syncs the accounts one after another on its sync thread, one Gmail
+client each, and a failing account doesn't hold up the rest. "All" runs the
+same newest-first query per account and merges by date; each thread carries
+its account, so triage, replies, drafts and downloads use the right token.
+Labels are per account (IDs such as `Label_1` repeat across accounts), so in
+"All" they are grouped by address and choosing one narrows the window to that
+account. The command line and the agent still read the first account.
 
 ## Data model
 

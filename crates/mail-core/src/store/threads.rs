@@ -57,7 +57,7 @@ impl Store {
         let rows = statement
             .query_map(params![account.id, label], message_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut threads = summarize(rows, &account.email);
+        let mut threads = summarize(rows, account);
         threads.sort_by_key(|thread| std::cmp::Reverse(thread.last_date));
         Ok(threads)
     }
@@ -86,7 +86,7 @@ impl Store {
         let rows = statement
             .query_map(params![account.id, ids], message_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut by_id: HashMap<String, ThreadSummary> = summarize(rows, &account.email)
+        let mut by_id: HashMap<String, ThreadSummary> = summarize(rows, account)
             .into_iter()
             .map(|thread| (thread.thread_id.clone(), thread))
             .collect();
@@ -141,13 +141,14 @@ fn message_row(row: &rusqlite::Row) -> rusqlite::Result<MessageRow> {
 }
 
 /// Folds messages, grouped by thread and oldest first, into summaries.
-fn summarize(rows: Vec<MessageRow>, own_address: &str) -> Vec<ThreadSummary> {
+fn summarize(rows: Vec<MessageRow>, account: &Account) -> Vec<ThreadSummary> {
     let mut threads: Vec<ThreadSummary> = Vec::new();
     let mut labels: Vec<BTreeSet<String>> = Vec::new();
     for row in rows {
         let starts_thread = threads.last().is_none_or(|t| t.thread_id != row.thread_id);
         if starts_thread {
             threads.push(ThreadSummary {
+                account_id: account.id,
                 thread_id: row.thread_id.clone(),
                 subject: row.subject.clone(),
                 ..ThreadSummary::default()
@@ -155,7 +156,7 @@ fn summarize(rows: Vec<MessageRow>, own_address: &str) -> Vec<ThreadSummary> {
             labels.push(BTreeSet::new());
         }
         let thread = threads.last_mut().expect("a thread was just pushed");
-        let sender = sender_name(&row.from_name, &row.from_addr, own_address);
+        let sender = sender_name(&row.from_name, &row.from_addr, &account.email);
         if !thread.senders.contains(&sender) {
             thread.senders.push(sender);
         }

@@ -98,7 +98,8 @@ impl Store {
 
     // Accounts
 
-    /// The account this database belongs to, if `mail auth` has run.
+    /// The first account signed in, if `mail auth` has run. The command line
+    /// and the agent read this one.
     pub fn account(&self) -> anyhow::Result<Option<Account>> {
         let account = self
             .connection
@@ -111,13 +112,24 @@ impl Store {
         Ok(account)
     }
 
+    /// Every signed-in account, in the order they were added.
+    pub fn accounts(&self) -> anyhow::Result<Vec<Account>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id, email, history_id, synced_at FROM accounts ORDER BY id")?;
+        let accounts = statement
+            .query_map([], account_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(accounts)
+    }
+
+    /// Adds an account, or returns it if it is already here (in any case).
     pub fn add_account(&self, email: &str) -> anyhow::Result<Account> {
-        if let Some(existing) = self.account()? {
-            ensure!(
-                existing.email.eq_ignore_ascii_case(email),
-                "This database belongs to {}. Mail supports one account for now.",
-                existing.email
-            );
+        let existing = self
+            .accounts()?
+            .into_iter()
+            .find(|account| account.email.eq_ignore_ascii_case(email));
+        if let Some(existing) = existing {
             return Ok(existing);
         }
         self.connection
