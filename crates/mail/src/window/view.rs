@@ -733,25 +733,40 @@ fn message_header(
     detail: Option<&str>,
 ) -> bool {
     let palette = theme::palette(ui.ctx());
+    let date = RichText::new(dates::human(message.internal_date))
+        .font(theme::regular(13.5))
+        .color(palette.dim);
+    // The date goes on the right first; sender and detail share what's left,
+    // so a long preview ends in "…" instead of running under the date.
+    let date_width = ui
+        .painter()
+        .layout_no_wrap(date.text().to_owned(), theme::regular(13.5), palette.dim)
+        .size()
+        .x;
     let response = ui
         .horizontal(|ui| {
-            ui.label(RichText::new(sender_label(message, own_address)).font(theme::semibold(16.0)));
+            let height = ui.spacing().interact_size.y;
+            let room = |ui: &egui::Ui| (ui.available_width() - date_width - 18.0).max(0.0);
+            let sender = egui::Label::new(
+                RichText::new(sender_label(message, own_address)).font(theme::semibold(16.0)),
+            )
+            .truncate();
+            let sender_room = room(ui);
+            ui.allocate_ui(Vec2::new(sender_room, height), |ui| ui.add(sender));
             if let Some(detail) = detail {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(detail)
-                            .font(theme::regular(14.5))
-                            .color(palette.secondary),
-                    )
-                    .truncate(),
-                );
+                let detail = egui::Label::new(
+                    RichText::new(detail)
+                        .font(theme::regular(14.5))
+                        .color(palette.secondary),
+                )
+                .truncate();
+                let detail_room = room(ui);
+                if detail_room > 30.0 {
+                    ui.allocate_ui(Vec2::new(detail_room, height), |ui| ui.add(detail));
+                }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(
-                    RichText::new(dates::human(message.internal_date))
-                        .font(theme::regular(13.5))
-                        .color(palette.dim),
-                );
+                ui.label(date);
             });
         })
         .response
