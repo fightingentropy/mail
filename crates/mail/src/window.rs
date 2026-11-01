@@ -12,6 +12,7 @@ mod files;
 mod keys;
 mod links;
 mod script;
+mod shortcuts;
 mod state;
 mod theme;
 mod view;
@@ -37,7 +38,7 @@ pub struct Options {
     pub demo: bool,
     /// Save a PNG of the window to this path after it renders, then quit.
     pub screenshot: Option<PathBuf>,
-    /// Keys to press in the demo before the screenshot, such as `j e / text:seat`.
+    /// Keys to press in the demo before the screenshot, such as `j e cmd+k text:seat`.
     pub demo_keys: Option<String>,
     /// Light or dark instead of following macOS, for screenshots of both.
     pub appearance: Option<egui::Theme>,
@@ -100,7 +101,7 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
             };
             Ok(Box::new(Shell {
                 model,
-                screen: Screen::new(status),
+                screen: Screen::new(status, paths.root.join("shortcuts.json")),
                 syncer,
                 paths,
                 demo,

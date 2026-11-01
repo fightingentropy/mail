@@ -182,7 +182,7 @@ Choices:
 - **Local changes first.** Each sync sends queued triage before it pulls,
   and re-applies whatever was queued while it ran.
 - **No background process.** Sync runs when you run `mail sync`, and while
-  the window is open (at launch, every two minutes, after triage, `⌘R`).
+  the window is open (at launch, every two minutes, after triage, `⇧⌘N`).
   Nothing runs when Mail is closed.
 
 ## Search
@@ -260,12 +260,26 @@ Rules:
    then: clickable links in bodies (`http`, `https` and `mailto` only, full
    address on hover, opened only on a click), attachments on demand, the HTML
    view, and a light palette that follows the macOS appearance.
+
+   *Shortcuts as data* (added after): `keys.rs` holds a keymap from actions
+   to shortcuts instead of a hard-coded match. Each action has Gmail's
+   letter and a macOS chord (`⌘⌫` trash, `⌃⌘A` archive, `⌘R` reply, `⌘K`
+   search, `⌘,` Settings); `/` shows every shortcut, drawn from the keymap
+   in effect. Symbols such as `#` and `?` match the character typed, since
+   keyboards reach them differently; everything else matches a key with
+   modifiers. Settings records new shortcuts by key press. Shortcuts compete
+   only within a scope (the mailbox, or the compose fields, where a
+   shortcut needs ⌘, ⌃ or ⌥ so letters still type), and a shortcut taken
+   from another action moves rather than being refused. Only changes are
+   saved, to `shortcuts.json`, so later defaults reach untouched actions.
+   Esc and the keys inside overlays stay fixed, so no rebinding can trap
+   you. Conversations also have a right-click menu with the same actions.
 3. **Writing.** *Done.* `r`, `a` and `c` open a compose panel in the
    reader's place: a reply quotes the original with the cursor above it,
    addressed to the sender (or everyone but you with `a`). `⌘S` saves to
    Gmail's Drafts on a worker thread (`drafts.create`, then `drafts.update`
    for the same draft) and the next sync brings the draft into the local copy;
-   `⌘⇧D` discards. Messages are built locally as RFC 5322 (UTF-8 text, base64
+   `⇧⌘D` discards. Messages are built locally as RFC 5322 (UTF-8 text, base64
    body, RFC 2047 headers, line breaks stripped from every header so no field
    can inject one). The same code serves `mail draft` and the agent's
    `create_draft`. Checked end to end on a real account: draft created, synced

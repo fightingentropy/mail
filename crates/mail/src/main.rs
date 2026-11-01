@@ -30,7 +30,7 @@ struct Cli {
     /// Save a PNG of the window to this path once it has rendered, then quit.
     #[arg(long, value_name = "FILE", hide = true)]
     screenshot: Option<PathBuf>,
-    /// Keys to press in the demo before a screenshot, e.g. "j e / text:seat".
+    /// Keys to press in the demo before a screenshot, e.g. "j e cmd+k text:seat".
     #[arg(long, value_name = "KEYS", hide = true, requires = "demo")]
     demo_keys: Option<String>,
     /// Draw the window light or dark instead of following macOS.

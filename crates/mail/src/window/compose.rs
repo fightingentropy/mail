@@ -1,6 +1,6 @@
 //! The compose panel: a reply or a new message. It takes the reader's place
 //! while open. ⌘S saves it to Gmail's Drafts; ⌘Enter asks to send it, and it
-//! goes only after you confirm.
+//! goes only after you confirm. Those keys can be changed in Settings.
 
 use egui::{
     Margin, RichText, ScrollArea, TextEdit, Vec2,
@@ -11,7 +11,10 @@ use mail_core::{
     model::Message,
 };
 
-use super::theme;
+use super::{
+    keys::{Bindable, Keymap},
+    theme,
+};
 use crate::dates;
 
 const READING_WIDTH: f32 = 760.0;
@@ -131,8 +134,8 @@ impl Compose {
 }
 
 /// Draws the panel. Typing goes straight into the fields; shortcuts are
-/// handled in `keys.rs`.
-pub fn draw(ui: &mut egui::Ui, compose: &mut Compose) {
+/// handled in `keys.rs`, and the footer shows the ones in effect.
+pub fn draw(ui: &mut egui::Ui, compose: &mut Compose, keymap: &Keymap) {
     let palette = theme::palette(ui.ctx());
     let side = ((ui.available_width() - READING_WIDTH) / 2.0).clamp(36.0, 120.0) as i8;
     egui::Frame::new()
@@ -186,7 +189,7 @@ pub fn draw(ui: &mut egui::Ui, compose: &mut Compose) {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("⌘↩ send    ⌘S save to Drafts    ⌘⇧D discard    Esc close")
+                    RichText::new(footer_hints(keymap))
                         .font(theme::regular(13.0))
                         .color(palette.dim),
                 );
@@ -231,4 +234,23 @@ fn field(
         )
     })
     .inner
+}
+
+/// "⌘↩ send    ⌘S save to Drafts    ⇧⌘D discard    Esc close", skipping
+/// any action whose shortcuts were all removed.
+fn footer_hints(keymap: &Keymap) -> String {
+    let actions = [
+        (Bindable::Send, "send"),
+        (Bindable::SaveDraft, "save to Drafts"),
+        (Bindable::DiscardDraft, "discard"),
+    ];
+    let mut hints: Vec<String> = actions
+        .into_iter()
+        .filter_map(|(bindable, what)| {
+            let key = keymap.hint(bindable);
+            (!key.is_empty()).then(|| format!("{key} {what}"))
+        })
+        .collect();
+    hints.push("Esc close".to_owned());
+    hints.join("    ")
 }

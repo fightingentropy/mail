@@ -6,14 +6,15 @@ use egui::{
     Stroke, TextEdit, Vec2,
     text::{LayoutJob, TextFormat, TextWrapping},
 };
-use std::ops::Range;
+use std::{ops::Range, path::PathBuf};
 
 use mail_core::model::{Attachment, Message, ThreadSummary};
 
 use super::{
     compose,
-    keys::{Command, Focus, Keys, Press, SHORTCUTS},
+    keys::{Bindable, Command, Focus, Keymap, Keys, Press},
     links,
+    shortcuts::{self, Settings},
     state::{Action, MAILBOXES, Model, SendSummary, View},
     theme::{self, Palette},
 };
@@ -35,6 +36,9 @@ pub enum SyncStatus {
 /// Window state the model doesn't need: focus, scrolling, the search text.
 pub struct Screen {
     keys: Keys,
+    /// Where Settings saves changed shortcuts.
+    shortcuts_path: PathBuf,
+    settings: Option<Settings>,
     search_text: String,
     focus_search: bool,
     search_focused: bool,
@@ -48,9 +52,11 @@ pub struct Screen {
 }
 
 impl Screen {
-    pub fn new(status: SyncStatus) -> Self {
+    pub fn new(status: SyncStatus, shortcuts_path: PathBuf) -> Self {
         Self {
-            keys: Keys::default(),
+            keys: Keys::new(Keymap::load(&shortcuts_path)),
+            shortcuts_path,
+            settings: None,
             search_text: String::new(),
             focus_search: false,
             search_focused: false,
@@ -69,6 +75,10 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
     let palette = theme::palette(ui.ctx());
     let mut actions = Vec::new();
     handle_keys(ui.ctx(), model, screen, &mut actions);
+    let undo_key = screen.keys.keymap.hint(Bindable::Undo);
+    if model.undo_key != undo_key {
+        model.undo_key = undo_key;
+    }
 
     egui::Panel::bottom("status")
         .exact_size(32.0)
@@ -77,7 +87,7 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
                 .fill(palette.sidebar)
                 .inner_margin(Margin::symmetric(18, 0)),
         )
-        .show(ui, |ui| status_bar(ui, model, screen));
+        .show(ui, |ui| status_bar(ui, model, screen, &mut actions));
     egui::Panel::left("sidebar")
         .exact_size(SIDEBAR_WIDTH)
         .resizable(false)
@@ -99,7 +109,7 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(palette.background))
         .show(ui, |ui| match &mut model.compose {
-            Some(compose) => compose::draw(ui, compose),
+            Some(compose) => compose::draw(ui, compose, &screen.keys.keymap),
             None => reader(ui, model, screen, &mut actions),
         });
 
@@ -107,7 +117,13 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
         label_picker(ui.ctx(), model, &mut actions);
     }
     if model.help {
-        help(ui.ctx(), &mut actions);
+        shortcuts::help_overlay(ui.ctx(), &screen.keys.keymap, &mut actions);
+    }
+    if let Some(settings) = &mut screen.settings {
+        let keymap = &mut screen.keys.keymap;
+        if !shortcuts::settings_window(ui.ctx(), settings, keymap, &screen.shortcuts_path) {
+            screen.settings = None;
+        }
     }
     if let Some(summary) = &model.confirm_send {
         confirm_send(ui.ctx(), summary, &mut actions);
@@ -128,7 +144,9 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
 }
 
 fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions: &mut Vec<Action>) {
-    let focus = if model.help {
+    let focus = if screen.settings.is_some() {
+        Focus::Settings
+    } else if model.help {
         Focus::Help
     } else if model.picker.is_some() {
         Focus::Picker
@@ -157,6 +175,15 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
             })
             .collect()
     });
+    if let Some(settings) = &mut screen.settings {
+        settings.record(
+            ctx,
+            &presses,
+            &mut screen.keys.keymap,
+            &screen.shortcuts_path,
+        );
+        return;
+    }
     for press in presses {
         match screen.keys.command(&press, focus) {
             Some(Command::Act(action)) => {
@@ -179,6 +206,7 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
                 screen.reader_target = Some((screen.reader_offset + direction * page).max(0.0));
             }
             Some(Command::SyncNow) => screen.sync_requested = true,
+            Some(Command::OpenSettings) => screen.settings = Some(Settings::default()),
             None => {}
         }
     }
@@ -307,8 +335,9 @@ fn thread_list(
                 .margin(Vec2::new(12.0, 9.0))
                 .desired_width(f32::INFINITY);
             let response = ui.add(field);
-            if !response.has_focus() && screen.search_text.is_empty() {
-                key_hint(ui, response.rect, "/");
+            let search_key = screen.keys.keymap.hint(Bindable::Search);
+            if !response.has_focus() && screen.search_text.is_empty() && !search_key.is_empty() {
+                key_hint(ui, response.rect, &search_key);
             }
             if std::mem::take(&mut screen.focus_search) {
                 response.request_focus();
@@ -375,35 +404,40 @@ fn thread_list(
             area = area.vertical_scroll_offset(top + ROW_HEIGHT - screen.list_height);
         }
     }
+    let keymap = &screen.keys.keymap;
     let output = area.show_rows(ui, ROW_HEIGHT, model.threads.len(), |ui, rows| {
         for index in rows {
-            if thread_row(ui, &model.threads[index], index == model.selected) {
+            let thread = &model.threads[index];
+            let selected = index == model.selected;
+            let response = thread_row(ui, thread, selected);
+            // A right click selects the row first, so the menu acts on it.
+            if response.clicked() || (response.secondary_clicked() && !selected) {
                 actions.push(Action::Select(index));
             }
+            response.context_menu(|ui| conversation_menu(ui, thread, keymap, actions));
         }
     });
     screen.list_offset = output.state.offset.y;
     screen.list_height = output.inner_rect.height();
 }
 
-/// A small key cap at the right end of a field, like `/` for search.
+/// A small key cap at the right end of a field, like `⌘K` for search.
 fn key_hint(ui: &egui::Ui, field: egui::Rect, key: &str) {
     let palette = theme::palette(ui.ctx());
-    let center = Pos2::new(field.right() - 22.0, field.center().y);
-    let cap = egui::Rect::from_center_size(center, Vec2::new(22.0, 22.0));
+    let galley =
+        ui.painter()
+            .layout_no_wrap(key.to_owned(), theme::medium(12.5), palette.secondary);
+    let width = (galley.size().x + 10.0).max(22.0);
+    let center = Pos2::new(field.right() - 11.0 - width / 2.0, field.center().y);
+    let cap = egui::Rect::from_center_size(center, Vec2::new(width, 22.0));
     ui.painter().rect_stroke(
         cap,
         CornerRadius::same(5),
         Stroke::new(1.0, palette.dim),
         egui::StrokeKind::Inside,
     );
-    ui.painter().text(
-        center,
-        egui::Align2::CENTER_CENTER,
-        key,
-        theme::medium(12.5),
-        palette.secondary,
-    );
+    ui.painter()
+        .galley(center - galley.size() / 2.0, galley, palette.secondary);
 }
 
 fn view_title(model: &Model) -> String {
@@ -424,8 +458,8 @@ fn view_title(model: &Model) -> String {
     }
 }
 
-/// One conversation in the list. Returns true when clicked.
-fn thread_row(ui: &mut egui::Ui, thread: &ThreadSummary, selected: bool) -> bool {
+/// One conversation in the list.
+fn thread_row(ui: &mut egui::Ui, thread: &ThreadSummary, selected: bool) -> egui::Response {
     let palette = theme::palette(ui.ctx());
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
@@ -514,7 +548,60 @@ fn thread_row(ui: &mut egui::Ui, thread: &ThreadSummary, selected: bool) -> bool
         rect.bottom() - 0.5,
         Stroke::new(1.0, palette.divider),
     );
-    response.clicked()
+    response
+}
+
+/// The right-click menu on a conversation, with each item's shortcut.
+fn conversation_menu(
+    ui: &mut egui::Ui,
+    thread: &ThreadSummary,
+    keymap: &Keymap,
+    actions: &mut Vec<Action>,
+) {
+    ui.set_min_width(230.0);
+    let in_inbox = thread.label_ids.iter().any(|id| id == "INBOX");
+    let read = if thread.unread {
+        "Mark as read"
+    } else {
+        "Mark as unread"
+    };
+    let star = if thread.starred { "Unstar" } else { "Star" };
+    let groups: [&[(&str, Bindable, Action)]; 3] = [
+        &[
+            ("Archive", Bindable::Archive, Action::Archive),
+            ("Move to Trash", Bindable::Trash, Action::Trash),
+            (read, Bindable::ToggleUnread, Action::ToggleUnread),
+            (star, Bindable::ToggleStar, Action::ToggleStar),
+            ("Label…", Bindable::Label, Action::OpenPicker),
+        ],
+        &[
+            ("Reply", Bindable::Reply, Action::Reply),
+            ("Reply all", Bindable::ReplyAll, Action::ReplyAll),
+        ],
+        &[(
+            "Open the HTML version",
+            Bindable::OpenHtml,
+            Action::OpenHtml,
+        )],
+    ];
+    for (index, group) in groups.into_iter().enumerate() {
+        if index > 0 {
+            ui.separator();
+        }
+        for (label, bindable, action) in group {
+            if *bindable == Bindable::Archive && !in_inbox {
+                continue;
+            }
+            let item = egui::Button::new(RichText::new(*label).font(theme::regular(14.5)))
+                .shortcut_text(
+                    RichText::new(keymap.menu_hint(*bindable)).font(theme::regular(13.5)),
+                );
+            if ui.add(item).clicked() {
+                actions.push(action.clone());
+                ui.close();
+            }
+        }
+    }
 }
 
 /// Lays out text pieces on one line, ending in "…" if they don't fit.
@@ -901,7 +988,7 @@ fn size(bytes: i64) -> String {
 
 // Status bar
 
-fn status_bar(ui: &mut egui::Ui, model: &Model, screen: &Screen) {
+fn status_bar(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut Vec<Action>) {
     let palette = theme::palette(ui.ctx());
     ui.horizontal_centered(|ui| {
         let pending = model.pending_changes();
@@ -934,13 +1021,35 @@ fn status_bar(ui: &mut egui::Ui, model: &Model, screen: &Screen) {
             );
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(
-                RichText::new("?  Shortcuts")
-                    .font(theme::regular(13.0))
-                    .color(palette.dim),
-            );
+            let keymap = &screen.keys.keymap;
+            if status_link(ui, &keymap.hint(Bindable::Shortcuts), "Shortcuts") {
+                actions.push(Action::ToggleHelp);
+            }
+            ui.add_space(14.0);
+            if status_link(ui, &keymap.hint(Bindable::Settings), "Settings") {
+                screen.settings = Some(Settings::default());
+            }
         });
     });
+}
+
+/// "⌘,  Settings" at the right of the status bar. Returns true when clicked.
+fn status_link(ui: &mut egui::Ui, key: &str, name: &str) -> bool {
+    let palette = theme::palette(ui.ctx());
+    let text = if key.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{key}  {name}")
+    };
+    let link = egui::Label::new(
+        RichText::new(text)
+            .font(theme::regular(13.0))
+            .color(palette.dim),
+    )
+    .sense(Sense::click());
+    ui.add(link)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
 }
 
 // Overlays
@@ -1013,34 +1122,6 @@ fn label_picker(ctx: &egui::Context, model: &Model, actions: &mut Vec<Action>) {
     }
 }
 
-fn help(ctx: &egui::Context, actions: &mut Vec<Action>) {
-    let palette = theme::palette(ctx);
-    let response = egui::Modal::new(Id::new("help"))
-        .frame(overlay_frame(palette))
-        .show(ctx, |ui| {
-            ui.set_width(440.0);
-            ui.label(RichText::new("Keyboard shortcuts").font(theme::semibold(18.0)));
-            ui.add_space(12.0);
-            egui::Grid::new("shortcuts")
-                .num_columns(2)
-                .spacing(Vec2::new(28.0, 9.0))
-                .show(ui, |ui| {
-                    for (keys, what) in SHORTCUTS {
-                        ui.label(
-                            RichText::new(*keys)
-                                .font(theme::medium(14.5))
-                                .color(palette.accent),
-                        );
-                        ui.label(RichText::new(*what).font(theme::regular(14.5)));
-                        ui.end_row();
-                    }
-                });
-        });
-    if response.should_close() {
-        actions.push(Action::CloseHelp);
-    }
-}
-
 /// Shows exactly who a message goes to before it is sent.
 fn confirm_send(ctx: &egui::Context, summary: &SendSummary, actions: &mut Vec<Action>) {
     let palette = theme::palette(ctx);
@@ -1106,7 +1187,7 @@ fn confirm_send(ctx: &egui::Context, summary: &SendSummary, actions: &mut Vec<Ac
     }
 }
 
-fn overlay_frame(palette: &Palette) -> egui::Frame {
+pub(super) fn overlay_frame(palette: &Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(palette.overlay)
         .stroke(Stroke::new(1.0, palette.divider))

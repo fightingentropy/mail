@@ -156,6 +156,8 @@ pub struct Model {
     pub help: bool,
     /// One line for the status bar, such as "Archived. Press z to undo."
     pub notice: Option<String>,
+    /// The Undo shortcut for that line; the window keeps it current.
+    pub undo_key: String,
     /// Set after a change, so the window can ask sync to send it.
     pub wants_sync: bool,
     /// The reply or new message being written, shown instead of the reader.
@@ -184,6 +186,7 @@ impl Model {
             picker: None,
             help: false,
             notice: None,
+            undo_key: "z".into(),
             wants_sync: false,
             compose: None,
             confirm_send: None,
@@ -380,8 +383,7 @@ impl Model {
             }
             Action::CloseCompose => match &self.compose {
                 Some(compose) if compose.is_dirty() => {
-                    self.notice =
-                        Some("Not saved yet: ⌘S saves it to Drafts, ⌘⇧D discards it.".into());
+                    self.notice = Some("Not saved yet: save it to Drafts or discard it.".into());
                 }
                 Some(_) => self.compose = None,
                 None => {}
@@ -580,7 +582,10 @@ impl Model {
         });
         self.store
             .apply_change(self.account.id, &thread_id, &change)?;
-        self.notice = Some(format!("{done}. Press z to undo."));
+        self.notice = Some(match self.undo_key.as_str() {
+            "" => format!("{done}."),
+            key => format!("{done}. Press {key} to undo."),
+        });
         self.wants_sync = true;
         self.forget_selection_if_gone(&thread_id)?;
         Ok(())

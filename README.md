@@ -68,23 +68,35 @@ database, so the window opens and responds instantly; it syncs in the
 background while open (at launch, every two minutes, and right after you
 triage) and nothing runs once you quit.
 
-| Key | Does |
-|---|---|
-| `j` `k` | Next and previous conversation |
-| `e` | Archive |
-| `#` or Delete | Move to Trash |
-| `u` / `s` | Mark read or unread / star |
-| `l` | Add or remove a label |
-| `z` | Undo |
-| `/` | Search, live as you type |
-| Space | Scroll the conversation |
-| `h` | Open the message's HTML version in your browser |
-| `g` then `i` `s` `t` `d` `a` | Inbox, Starred, Sent, Drafts, All mail |
-| `r` / `a` / `c` | Reply, reply all, new message |
-| `⌘↩` | Send, after a confirmation showing who it goes to |
-| `⌘S` / `⌘⇧D` | Save the draft to Gmail's Drafts / discard it |
-| `⌘R` | Sync now |
-| `?` | All shortcuts |
+Gmail's letters and the usual macOS chords both work:
+
+| Gmail | macOS | Does |
+|---|---|---|
+| `j` `k` | `↓` `↑` | Next and previous conversation |
+| `e` | `⌃⌘A` | Archive |
+| `#` | `⌘⌫`, Delete | Move to Trash |
+| `u` | `⇧⌘U` | Mark read or unread |
+| `s` | `⇧⌘L` | Star or unstar |
+| `l` | | Add or remove a label |
+| `z` | `⌘Z` | Undo |
+| `r` / `a` / `c` | `⌘R` / `⇧⌘R` / `⌘N` | Reply, reply all, new message |
+| | `⌘K` | Search, live as you type |
+| Space | | Scroll the conversation |
+| `h` | | Open the message's HTML version in your browser |
+| `g` then `i` `s` `t` `d` `a` | | Inbox, Starred, Sent, Drafts, All mail |
+| | `⌘↩` | Send, after a confirmation showing who it goes to |
+| | `⌘S` / `⇧⌘D` | Save the draft to Gmail's Drafts / discard it |
+| | `⇧⌘N` | Sync now |
+| `/` or `?` | | All shortcuts |
+| | `⌘,` | Settings |
+
+Every shortcut can be changed in Settings: click + next to an action and
+press the keys you want (a plain letter followed by another within a second
+makes a sequence like `g i`). A shortcut already in use moves to the new
+action, and Reset puts the defaults back. Changes are saved to
+`shortcuts.json` in Mail's data folder, as the difference from the defaults.
+
+Right-click a conversation for the same actions, with their shortcuts.
 
 Triage applies locally at once and waits in a queue until the next sync sends
 it to Gmail, so it works offline too.
@@ -164,9 +176,9 @@ against an in-memory fake of the Gmail API, so tests never touch a real
 mailbox. Test data and the demo mailbox are made up.
 
 `mail --demo --screenshot out.png` renders the window to a PNG and quits;
-add `--demo-keys "j e / text:seat"` to press keys first (`click:x,y` and
-`hover:x,y` work too, in points), and `--appearance light` or `dark` to pick
-the palette. That is how the screenshot above is made and how the window's
+add `--demo-keys "j e cmd+k text:seat"` to press keys first (`click:x,y`,
+`rightclick:x,y` and `hover:x,y` work too, in points), and `--appearance
+light` or `dark` to pick the palette. That is how the screenshot above is made and how the window's
 keyboard handling gets checked without a person at the keyboard.
 
 ## Privacy
