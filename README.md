@@ -24,7 +24,7 @@ toolchain automatically).
 
 ```bash
 git clone https://github.com/fightingentropy/mail && cd mail
-cargo install --path crates/mail
+cargo install --locked --path crates/mail
 ```
 
 `~/.cargo/bin/mail` takes the place of macOS's old `/usr/bin/mail` when

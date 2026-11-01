@@ -25,6 +25,13 @@ use crate::dates;
 pub fn auth(paths: &Paths, client_file: Option<&Path>) -> anyhow::Result<()> {
     let client = match client_file {
         Some(file) => {
+            if !file.exists() {
+                anyhow::bail!(
+                    "No file at {}. Create a Desktop app OAuth client in Google Cloud and download \
+                     its JSON first: https://github.com/fightingentropy/mail/blob/main/docs/google-setup.md",
+                    file.display()
+                );
+            }
             let text = fs::read_to_string(file)
                 .with_context(|| format!("Could not read {}", file.display()))?;
             let client = OAuthClient::from_google_json(&text)?;
