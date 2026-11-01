@@ -5,13 +5,14 @@ A fast native Gmail client for Apple Silicon Macs, built in public.
 Mail keeps a local copy of your recent Gmail in SQLite. Reading and searching
 work offline and take milliseconds; the network is only used to sync. The same
 binary has a command line and a one-shot JSON CLI that coding agents such as
-Claude Code and Codex can use to search your mail. Agents can't send anything.
+Claude Code and Codex can use to search your mail and write drafts. Only you
+send, from the window, after a confirmation.
 
 ![Mail's window on the demo mailbox: sidebar, conversation list and reader](docs/window.png)
 
 > **Status: milestone 3.** Sync, offline search, the keyboard-driven window
-> and replies saved as Gmail drafts work. Mail doesn't send: you send from
-> Gmail. See the [milestones](docs/design.md#milestones).
+> and replies and new messages, saved as drafts or sent after you confirm,
+> work. See the [milestones](docs/design.md#milestones).
 
 ## Why
 
@@ -75,6 +76,7 @@ triage) and nothing runs once you quit.
 | `h` | Open the message's HTML version in your browser |
 | `g` then `i` `s` `t` `d` `a` | Inbox, Starred, Sent, Drafts, All mail |
 | `r` / `a` / `c` | Reply, reply all, new message |
+| `⌘↩` | Send, after a confirmation showing who it goes to |
 | `⌘S` / `⌘⇧D` | Save the draft to Gmail's Drafts / discard it |
 | `⌘R` | Sync now |
 | `?` | All shortcuts |
@@ -132,9 +134,10 @@ mail (CLI, agent CLI, window)  →  mail-core: auth · gmail · sync · store
 - **Search.** An FTS5 index over subject, sender, recipients and body,
   ranked with bm25. Words match as you type, from the second letter, in a
   millisecond or two ([numbers](docs/design.md#performance)).
-- **Drafts.** Replies are built locally as RFC 5322 messages, threaded with
-  `In-Reply-To` and `References`, and saved through Gmail's drafts API.
-  There is no send call anywhere in Mail.
+- **Writing.** Replies are built locally as RFC 5322 messages, threaded with
+  `In-Reply-To` and `References`, and saved through Gmail's drafts API. The
+  window sends a saved draft (`drafts.send`) only after you confirm; the
+  agent CLI and `mail draft` can't send.
 - **Window.** egui/eframe with an embedded Inter font. The drawing code reads
   a model that has no egui in it, so tests drive the window like a person at
   the keyboard.

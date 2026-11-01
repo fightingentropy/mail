@@ -223,3 +223,41 @@ fn saving_refuses_bad_addresses_and_huge_bodies() {
     assert!(save(&gmail, ME, &huge, None).is_err());
     assert!(gmail.calls().is_empty());
 }
+
+#[test]
+fn sending_saves_first_then_sends_that_draft() {
+    let gmail = FakeGmail::new(Vec::new());
+    let draft = Draft::reply(&original(), ME, false, "today");
+    let mut saved_as = None;
+    let sent = send(&gmail, ME, &draft, None, |id| {
+        saved_as = Some(id.to_owned())
+    })
+    .unwrap();
+    assert_eq!(saved_as.as_deref(), Some("draft-1"));
+    assert_eq!(sent, "sent-draft-1");
+    assert_eq!(
+        gmail.calls(),
+        ["create_draft draft-1", "send_draft draft-1"]
+    );
+    assert!(
+        gmail.draft("draft-1").is_none(),
+        "a sent draft leaves Drafts"
+    );
+}
+
+#[test]
+fn sending_needs_a_recipient_and_valid_addresses() {
+    let gmail = FakeGmail::new(Vec::new());
+    let nobody = Draft {
+        subject: "Hi".into(),
+        body: "Hello".into(),
+        ..Draft::default()
+    };
+    assert!(send(&gmail, ME, &nobody, None, |_| {}).is_err());
+    let bad = Draft {
+        to: "bo@".into(),
+        ..nobody.clone()
+    };
+    assert!(send(&gmail, ME, &bad, None, |_| {}).is_err());
+    assert!(gmail.calls().is_empty(), "nothing reaches Gmail");
+}

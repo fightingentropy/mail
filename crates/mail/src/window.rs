@@ -239,6 +239,8 @@ impl Shell {
                 Finished::Saved(id) => self.apply(Action::DraftSaved(id)),
                 Finished::Failed(error) => self.apply(Action::DraftFailed(error)),
                 Finished::Discarded => self.model.wants_sync = true,
+                Finished::Sent => self.apply(Action::MessageSent),
+                Finished::SendFailed(error) => self.apply(Action::SendFailed(error)),
             }
         }
     }
@@ -297,6 +299,10 @@ impl Shell {
                     self.discard_draft(ctx, draft_id);
                     None
                 }
+                Effect::SendDraft { draft, draft_id } => {
+                    self.send_draft(ctx, draft, draft_id);
+                    None
+                }
                 Effect::OpenHtml { message_id, html } => {
                     Some(match files::open_html(&message_id, &html) {
                         Ok(_) => "Opened the HTML version in your browser.".to_owned(),
@@ -319,6 +325,22 @@ impl Shell {
         }
         let wake = ctx.clone();
         drafts::save(
+            &self.paths,
+            &self.model.account.email,
+            draft,
+            draft_id,
+            self.drafts_done.clone(),
+            move || wake.request_repaint(),
+        );
+    }
+
+    fn send_draft(&mut self, ctx: &egui::Context, draft: Draft, draft_id: Option<String>) {
+        if self.demo {
+            self.apply(Action::SendFailed("The demo mailbox doesn't send.".into()));
+            return;
+        }
+        let wake = ctx.clone();
+        drafts::send(
             &self.paths,
             &self.model.account.email,
             draft,

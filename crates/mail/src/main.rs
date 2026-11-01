@@ -62,7 +62,7 @@ enum Command {
     },
     /// Search downloaded mail. Works offline.
     Search(commands::SearchArgs),
-    /// Save a reply or new message to Gmail's Drafts. Mail never sends.
+    /// Save a reply or new message to Gmail's Drafts. It is not sent.
     Draft(commands::DraftArgs),
     /// Print a whole conversation.
     Thread {

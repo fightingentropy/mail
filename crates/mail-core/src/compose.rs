@@ -1,5 +1,6 @@
 //! Writing mail. A draft is built here as an RFC 5322 message and saved to
-//! Gmail's Drafts, where it syncs to every device. Mail itself never sends.
+//! Gmail's Drafts, where it syncs to every device. Only the window sends,
+//! through [`send`], after you confirm.
 
 use base64::{
     Engine,
@@ -111,6 +112,10 @@ impl Draft {
         }
     }
 
+    pub fn has_recipients(&self) -> bool {
+        !split_address_list(&self.to).is_empty() || !split_address_list(&self.cc).is_empty()
+    }
+
     /// Entries in To and Cc that don't look like an address.
     pub fn invalid_addresses(&self) -> Vec<String> {
         split_address_list(&self.to)
@@ -187,6 +192,25 @@ pub fn save(
         }
     }
     api.create_draft(&raw, thread_id)
+}
+
+/// Saves `draft` (updating `existing` if given) and sends it. `saved` hears
+/// the draft ID first, so a failed send can be retried without making a
+/// second draft. Returns the sent message's ID.
+///
+/// Only the window calls this, after you confirm. The agent CLI and
+/// `mail draft` stop at [`save`].
+pub fn send(
+    api: &dyn GmailApi,
+    from: &str,
+    draft: &Draft,
+    existing: Option<&str>,
+    saved: impl FnOnce(&str),
+) -> anyhow::Result<String> {
+    anyhow::ensure!(draft.has_recipients(), "Add a recipient first.");
+    let draft_id = save(api, from, draft, existing)?;
+    saved(&draft_id);
+    api.send_draft(&draft_id)
 }
 
 /// Gmail's draft API wants the message as base64url.

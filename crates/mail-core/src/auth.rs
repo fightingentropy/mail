@@ -19,9 +19,8 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Read, label, archive, trash and draft. Cannot permanently delete. Like
-/// every Gmail write scope it would also allow sending; Mail has no code that
-/// sends.
+/// Read, label, archive, trash, draft and send. Cannot permanently delete.
+/// Mail sends only from the window, after you confirm.
 pub const GMAIL_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";

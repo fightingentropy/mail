@@ -365,3 +365,101 @@ fn live_search_waits_for_a_second_letter() {
     model.apply(Action::Search("se".into())).unwrap();
     assert_eq!(model.view, View::Search("se".into()));
 }
+
+fn compose_to(model: &mut Model, to: &str) {
+    model.apply(Action::NewMessage).unwrap();
+    let compose = model.compose.as_mut().unwrap();
+    compose.to = to.into();
+    compose.subject = "Friday".into();
+    compose.body = "7:30 works.".into();
+}
+
+#[test]
+fn sending_asks_for_confirmation_first() {
+    let (mut model, _folder) = model();
+    compose_to(&mut model, "Maya <maya@fastmail.test>");
+    model.apply(Action::RequestSend).unwrap();
+    assert!(model.effects.is_empty(), "nothing goes before you confirm");
+    let summary = model.confirm_send.clone().unwrap();
+    assert_eq!(summary.to, "Maya <maya@fastmail.test>");
+    assert_eq!(summary.subject, "Friday");
+
+    model.apply(Action::CancelSend).unwrap();
+    assert!(model.confirm_send.is_none());
+    assert!(model.effects.is_empty());
+    assert!(model.compose.is_some(), "cancelling keeps the message");
+}
+
+#[test]
+fn confirming_sends_once_and_closes_on_success() {
+    let (mut model, _folder) = model();
+    compose_to(&mut model, "maya@fastmail.test");
+    model.apply(Action::RequestSend).unwrap();
+    model.apply(Action::ConfirmSend).unwrap();
+    let [
+        Effect::SendDraft {
+            draft,
+            draft_id: None,
+        },
+    ] = model.effects.as_slice()
+    else {
+        panic!("expected one send, got {:?}", model.effects);
+    };
+    assert_eq!(draft.to, "maya@fastmail.test");
+    // A second ⌘Enter while sending does nothing.
+    model.apply(Action::RequestSend).unwrap();
+    model.apply(Action::ConfirmSend).unwrap();
+    assert_eq!(model.effects.len(), 1);
+
+    // The save half reports the draft ID without changing the notice.
+    model.apply(Action::DraftSaved("draft-3".into())).unwrap();
+    assert_eq!(model.notice.as_deref(), Some("Sending…"));
+    model.apply(Action::MessageSent).unwrap();
+    assert!(model.compose.is_none());
+    assert_eq!(model.notice.as_deref(), Some("Sent."));
+    assert!(model.wants_sync);
+}
+
+#[test]
+fn a_failed_send_keeps_the_message_and_its_draft() {
+    let (mut model, _folder) = model();
+    compose_to(&mut model, "maya@fastmail.test");
+    model.apply(Action::RequestSend).unwrap();
+    model.apply(Action::ConfirmSend).unwrap();
+    model.apply(Action::DraftSaved("draft-3".into())).unwrap();
+    model
+        .apply(Action::SendFailed("Not sent: offline".into()))
+        .unwrap();
+    let compose = model.compose.as_ref().unwrap();
+    assert!(!compose.is_sending());
+    assert_eq!(compose.draft_id.as_deref(), Some("draft-3"));
+
+    // Retrying sends the same draft rather than making another.
+    model.effects.clear();
+    model.apply(Action::RequestSend).unwrap();
+    model.apply(Action::ConfirmSend).unwrap();
+    let [Effect::SendDraft { draft_id, .. }] = model.effects.as_slice() else {
+        panic!("expected one send, got {:?}", model.effects);
+    };
+    assert_eq!(draft_id.as_deref(), Some("draft-3"));
+}
+
+#[test]
+fn sending_needs_a_valid_recipient() {
+    let (mut model, _folder) = model();
+    compose_to(&mut model, "");
+    model.apply(Action::RequestSend).unwrap();
+    assert!(model.confirm_send.is_none());
+    assert_eq!(model.notice.as_deref(), Some("Add a recipient first."));
+
+    model.compose.as_mut().unwrap().to = "maya@".into();
+    model.apply(Action::RequestSend).unwrap();
+    assert!(model.confirm_send.is_none());
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .unwrap()
+            .starts_with("Not an email address")
+    );
+}

@@ -14,7 +14,7 @@ use super::{
     compose,
     keys::{Command, Focus, Keys, Press, SHORTCUTS},
     links,
-    state::{Action, MAILBOXES, Model, View},
+    state::{Action, MAILBOXES, Model, SendSummary, View},
     theme::{self, Palette},
 };
 use crate::dates;
@@ -109,6 +109,9 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
     if model.help {
         help(ui.ctx(), &mut actions);
     }
+    if let Some(summary) = &model.confirm_send {
+        confirm_send(ui.ctx(), summary, &mut actions);
+    }
 
     for action in actions {
         let clears_search = action == Action::ClearSearch;
@@ -129,6 +132,8 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
         Focus::Help
     } else if model.picker.is_some() {
         Focus::Picker
+    } else if model.confirm_send.is_some() {
+        Focus::ConfirmSend
     } else if model.compose.is_some() {
         Focus::Compose
     } else if screen.search_focused {
@@ -154,7 +159,17 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
     });
     for press in presses {
         match screen.keys.command(&press, focus) {
-            Some(Command::Act(action)) => actions.push(action),
+            Some(Command::Act(action)) => {
+                // Keep send keys away from the text fields: ⌘Enter and the
+                // confirming Enter must not also type a new line.
+                if matches!(action, Action::RequestSend | Action::ConfirmSend)
+                    && let Press::Key(key, modifiers) = press
+                {
+                    ctx.input_mut(|input| input.consume_key(modifiers, key));
+                    ctx.memory_mut(|memory| memory.stop_text_input());
+                }
+                actions.push(action);
+            }
             Some(Command::FocusSearch) => screen.focus_search = true,
             Some(Command::FocusList) => {
                 ctx.memory_mut(|memory| memory.surrender_focus(search_id()))
@@ -1015,6 +1030,71 @@ fn help(ctx: &egui::Context, actions: &mut Vec<Action>) {
         });
     if response.should_close() {
         actions.push(Action::CloseHelp);
+    }
+}
+
+/// Shows exactly who a message goes to before it is sent.
+fn confirm_send(ctx: &egui::Context, summary: &SendSummary, actions: &mut Vec<Action>) {
+    let palette = theme::palette(ctx);
+    let response = egui::Modal::new(Id::new("confirm-send"))
+        .frame(overlay_frame(palette))
+        .show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.label(RichText::new("Send this message?").font(theme::semibold(18.0)));
+            ui.add_space(12.0);
+            egui::Grid::new("send-summary")
+                .num_columns(2)
+                .spacing(Vec2::new(18.0, 8.0))
+                .show(ui, |ui| {
+                    let subject = if summary.subject.trim().is_empty() {
+                        "(no subject)"
+                    } else {
+                        summary.subject.as_str()
+                    };
+                    let rows = [
+                        ("To", summary.to.as_str()),
+                        ("Cc", summary.cc.as_str()),
+                        ("Subject", subject),
+                    ];
+                    for (label, value) in rows {
+                        if value.trim().is_empty() {
+                            continue;
+                        }
+                        ui.label(
+                            RichText::new(label)
+                                .font(theme::regular(14.5))
+                                .color(palette.dim),
+                        );
+                        ui.add(
+                            egui::Label::new(RichText::new(value).font(theme::regular(14.5)))
+                                .wrap(),
+                        );
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(18.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(RichText::new("Cancel   Esc").font(theme::regular(14.5)))
+                    .clicked()
+                {
+                    actions.push(Action::CancelSend);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let send = egui::Button::new(
+                        RichText::new("Send   ↩")
+                            .font(theme::semibold(14.5))
+                            .color(palette.background),
+                    )
+                    .fill(palette.accent);
+                    if ui.add(send).clicked() {
+                        actions.push(Action::ConfirmSend);
+                    }
+                });
+            });
+        });
+    if response.should_close() {
+        actions.push(Action::CancelSend);
     }
 }
 

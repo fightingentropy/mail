@@ -45,6 +45,7 @@ const UNTRASH_UNITS: u32 = 10;
 const CREATE_DRAFT_UNITS: u32 = 10;
 const UPDATE_DRAFT_UNITS: u32 = 15;
 const DELETE_DRAFT_UNITS: u32 = 10;
+const SEND_DRAFT_UNITS: u32 = 100;
 
 pub struct GmailClient {
     http: ureq::Agent,
@@ -382,6 +383,26 @@ impl GmailApi for GmailClient {
             Reply::NotFound => Outcome::Gone,
             Reply::Rejected(message) => Outcome::Rejected(message),
         })
+    }
+
+    fn send_draft(&self, draft_id: &str) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Sent {
+            id: String,
+        }
+        let url = format!("{API}/drafts/send");
+        let body = serde_json::json!({"id": draft_id});
+        let reply = self.send::<Sent>("drafts/send", SEND_DRAFT_UNITS, |authorization| {
+            self.http
+                .post(&url)
+                .header("Authorization", authorization)
+                .send_json(&body)
+        })?;
+        match reply {
+            Reply::Done(sent) => Ok(sent.id),
+            Reply::NotFound => bail!("The draft is gone from Gmail; nothing was sent"),
+            Reply::Rejected(message) => bail!("Gmail refused to send it: {message}"),
+        }
     }
 }
 

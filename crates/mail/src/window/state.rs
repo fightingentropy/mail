@@ -67,6 +67,12 @@ pub enum Action {
     /// Gmail saved the draft under this ID.
     DraftSaved(String),
     DraftFailed(String),
+    /// ⌘Enter: shows what is about to be sent and asks to confirm.
+    RequestSend,
+    ConfirmSend,
+    CancelSend,
+    MessageSent,
+    SendFailed(String),
     /// A link clicked in a body.
     OpenLink(String),
     /// An attachment chip clicked: the open thread's message and attachment.
@@ -98,6 +104,19 @@ pub enum Effect {
         draft_id: Option<String>,
     },
     DiscardDraft(String),
+    /// Save and send, after you confirmed. The only way Mail sends mail.
+    SendDraft {
+        draft: Draft,
+        draft_id: Option<String>,
+    },
+}
+
+/// Who and what a send goes to, as the confirmation shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SendSummary {
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
 }
 
 /// The thread in the reader.
@@ -141,6 +160,8 @@ pub struct Model {
     pub wants_sync: bool,
     /// The reply or new message being written, shown instead of the reader.
     pub compose: Option<Compose>,
+    /// What ⌘Enter is about to send, shown for confirmation.
+    pub confirm_send: Option<SendSummary>,
     /// Waiting for the shell, oldest first.
     pub effects: Vec<Effect>,
     undo: Option<Undo>,
@@ -165,6 +186,7 @@ impl Model {
             notice: None,
             wants_sync: false,
             compose: None,
+            confirm_send: None,
             effects: Vec::new(),
             undo: None,
             viewed_since: None,
@@ -366,11 +388,42 @@ impl Model {
             },
             Action::DraftSaved(draft_id) => {
                 if let Some(compose) = &mut self.compose {
+                    if compose.is_sending() {
+                        // The save half of a send: remember the draft so a
+                        // failed send can be retried without a second one.
+                        compose.draft_id = Some(draft_id);
+                        return Ok(());
+                    }
                     compose.saved(draft_id);
                 }
-                self.notice = Some("Saved to Drafts. Send it from Gmail when ready.".into());
+                self.notice = Some("Saved to Drafts.".into());
                 // Bring the draft into the local copy.
                 self.wants_sync = true;
+            }
+            Action::RequestSend => self.request_send(),
+            Action::ConfirmSend => {
+                if self.confirm_send.take().is_some()
+                    && let Some(compose) = &mut self.compose
+                    && let Some(draft) = compose.begin_send()
+                {
+                    self.effects.push(Effect::SendDraft {
+                        draft,
+                        draft_id: compose.draft_id.clone(),
+                    });
+                    self.notice = Some("Sending…".into());
+                }
+            }
+            Action::CancelSend => self.confirm_send = None,
+            Action::MessageSent => {
+                self.compose = None;
+                self.notice = Some("Sent.".into());
+                self.wants_sync = true;
+            }
+            Action::SendFailed(error) => {
+                if let Some(compose) = &mut self.compose {
+                    compose.send_failed();
+                }
+                self.notice = Some(error);
             }
             Action::DraftFailed(error) => {
                 if let Some(compose) = &mut self.compose {
@@ -430,6 +483,36 @@ impl Model {
         self.wants_sync = true;
         self.reload()?;
         Ok(None)
+    }
+
+    /// Checks the draft can go, then asks for confirmation. Nothing is sent
+    /// until `ConfirmSend`.
+    fn request_send(&mut self) {
+        let Some(compose) = &self.compose else {
+            return;
+        };
+        if compose.is_sending() {
+            return;
+        }
+        if compose.is_saving() {
+            self.notice = Some("Wait for the draft to finish saving.".into());
+            return;
+        }
+        let draft = compose.draft();
+        if !draft.has_recipients() {
+            self.notice = Some("Add a recipient first.".into());
+            return;
+        }
+        let invalid = draft.invalid_addresses();
+        if !invalid.is_empty() {
+            self.notice = Some(format!("Not an email address: {}", invalid.join(", ")));
+            return;
+        }
+        self.confirm_send = Some(SendSummary {
+            to: draft.to,
+            cc: draft.cc,
+            subject: draft.subject,
+        });
     }
 
     /// The message a reply answers: the newest one in the open thread that

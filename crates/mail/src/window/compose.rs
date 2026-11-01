@@ -1,6 +1,6 @@
-//! The compose panel: a reply or a new message, saved to Gmail's Drafts.
-//! It takes the reader's place while open. Mail does not send; the draft
-//! waits in Drafts on every device until you send it.
+//! The compose panel: a reply or a new message. It takes the reader's place
+//! while open. ⌘S saves it to Gmail's Drafts; ⌘Enter asks to send it, and it
+//! goes only after you confirm.
 
 use egui::{
     Margin, RichText, ScrollArea, TextEdit, Vec2,
@@ -34,8 +34,10 @@ pub struct Compose {
     /// What the fields held when opened or last saved: anything else is an
     /// unsaved edit.
     clean: Draft,
-    /// The draft on its way to Gmail.
-    sending: Option<Draft>,
+    /// The draft on its way to Drafts.
+    saving: Option<Draft>,
+    /// True from your confirmation until Gmail answers.
+    send_pending: bool,
     /// Which field takes the cursor when the panel opens; the view takes it.
     pub focus: Option<Field>,
 }
@@ -63,7 +65,8 @@ impl Compose {
             reply: draft.reply.clone(),
             draft_id: None,
             clean: draft,
-            sending: None,
+            saving: None,
+            send_pending: false,
             focus: Some(focus),
         }
     }
@@ -83,29 +86,47 @@ impl Compose {
     }
 
     pub fn is_saving(&self) -> bool {
-        self.sending.is_some()
+        self.saving.is_some()
     }
 
-    /// Starts a save; returns the draft to send, or `None` if one is already
-    /// on its way.
+    pub fn is_sending(&self) -> bool {
+        self.send_pending
+    }
+
+    /// Starts a save; returns the draft to save, or `None` while another
+    /// save or a send is on its way.
     pub fn begin_save(&mut self) -> Option<Draft> {
-        if self.sending.is_some() {
+        if self.saving.is_some() || self.send_pending {
             return None;
         }
         let draft = self.draft();
-        self.sending = Some(draft.clone());
+        self.saving = Some(draft.clone());
         Some(draft)
     }
 
     pub fn saved(&mut self, draft_id: String) {
         self.draft_id = Some(draft_id);
-        if let Some(sent) = self.sending.take() {
-            self.clean = sent;
+        if let Some(saved) = self.saving.take() {
+            self.clean = saved;
         }
     }
 
     pub fn save_failed(&mut self) {
-        self.sending = None;
+        self.saving = None;
+    }
+
+    /// Starts sending; returns the draft to send, or `None` while a save or
+    /// another send is on its way.
+    pub fn begin_send(&mut self) -> Option<Draft> {
+        if self.saving.is_some() || self.send_pending {
+            return None;
+        }
+        self.send_pending = true;
+        Some(self.draft())
+    }
+
+    pub fn send_failed(&mut self) {
+        self.send_pending = false;
     }
 }
 
@@ -165,12 +186,14 @@ pub fn draw(ui: &mut egui::Ui, compose: &mut Compose) {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("⌘S save to Drafts    ⌘⇧D discard    Esc close")
+                    RichText::new("⌘↩ send    ⌘S save to Drafts    ⌘⇧D discard    Esc close")
                         .font(theme::regular(13.0))
                         .color(palette.dim),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (status, color) = if compose.is_saving() {
+                    let (status, color) = if compose.is_sending() {
+                        ("Sending…", palette.accent)
+                    } else if compose.is_saving() {
                         ("Saving…", palette.secondary)
                     } else if compose.is_dirty() {
                         ("Not saved", palette.dim)

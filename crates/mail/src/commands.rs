@@ -324,7 +324,7 @@ pub fn draft(paths: &Paths, args: DraftArgs) -> anyhow::Result<()> {
     let draft = build_draft(&store, &account, request)?;
     let draft_id = save_draft(paths, &account, &draft)?;
     println!(
-        "Saved to Drafts ({draft_id}) for {}. Review and send it from Gmail.",
+        "Saved to Drafts ({draft_id}) for {}. Send it from Mail's window or Gmail.",
         if draft.to.is_empty() {
             "no recipients yet"
         } else {

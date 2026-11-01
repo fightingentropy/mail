@@ -1,8 +1,8 @@
 //! The Gmail REST API: the calls Mail makes and the JSON they return.
 //!
 //! Sync talks to [`GmailApi`] rather than to HTTP directly, so tests run the
-//! real sync logic against an in-memory mailbox. There is deliberately no
-//! method that sends mail; writing stops at Drafts.
+//! real sync logic against an in-memory mailbox. Sending is one call,
+//! `send_draft`, used only by the window after you confirm.
 
 pub mod attachments;
 mod client;
@@ -49,8 +49,7 @@ pub trait GmailApi: Sync {
     ) -> anyhow::Result<Outcome>;
     fn trash_thread(&self, thread_id: &str) -> anyhow::Result<Outcome>;
     fn untrash_thread(&self, thread_id: &str) -> anyhow::Result<Outcome>;
-    /// Saves an RFC 5322 message to Drafts and returns the draft ID. Drafts
-    /// are as far as Mail goes: there is no call that sends.
+    /// Saves an RFC 5322 message to Drafts and returns the draft ID.
     fn create_draft(&self, raw: &[u8], thread_id: Option<&str>) -> anyhow::Result<String>;
     /// Replaces a draft's message. `Gone` if the draft was sent or deleted.
     fn update_draft(
@@ -60,6 +59,9 @@ pub trait GmailApi: Sync {
         thread_id: Option<&str>,
     ) -> anyhow::Result<Outcome>;
     fn delete_draft(&self, draft_id: &str) -> anyhow::Result<Outcome>;
+    /// Sends a saved draft and returns the sent message's ID. Only the window
+    /// calls this, after you confirm; agents and the command line can't.
+    fn send_draft(&self, draft_id: &str) -> anyhow::Result<String>;
 }
 
 /// How Gmail answered a change. Transient failures are errors instead, so

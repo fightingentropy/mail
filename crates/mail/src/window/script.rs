@@ -2,7 +2,8 @@
 //! handling can be checked without a person at the keyboard.
 //!
 //! Steps are separated by spaces: a key name (`j`, `esc`, `enter`, `down`,
-//! `/`, `#`, `?`), `text:` followed by characters to type (`_` for a space),
+//! `/`, `#`, `?`, or with Command held as `cmd+enter`), `text:` followed by
+//! characters to type (`_` for a space),
 //! or `click:x,y` and `hover:x,y` in points from the window's top left.
 
 use std::collections::VecDeque;
@@ -22,6 +23,16 @@ fn step(token: &str) -> Vec<Event> {
     }
     if let Some(pos) = token.strip_prefix("hover:").and_then(point) {
         return vec![Event::PointerMoved(pos)];
+    }
+    // `cmd+enter`, `cmd+s`: a key with Command held.
+    if let Some(rest) = token.strip_prefix("cmd+") {
+        let key = match rest {
+            "enter" => Some(Key::Enter),
+            other => Key::from_name(&other.to_uppercase()),
+        };
+        return key
+            .map(|key| vec![press(key, Modifiers::COMMAND)])
+            .unwrap_or_default();
     }
     let named = match token {
         "esc" => Some(Key::Escape),

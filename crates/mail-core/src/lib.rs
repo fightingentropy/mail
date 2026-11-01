@@ -1,7 +1,8 @@
 //! Mail's engine: Google sign-in, Gmail sync, the local SQLite store and search.
 //!
 //! The command line and the desktop window are thin layers over this crate.
-//! Nothing here sends email: writing ends in Gmail's Drafts.
+//! Writing ends in Gmail's Drafts; the only send, `compose::send`, is called
+//! by the window after you confirm.
 
 pub mod auth;
 pub mod compose;

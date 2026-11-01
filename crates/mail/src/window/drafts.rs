@@ -1,5 +1,5 @@
-//! Saves and discards drafts on short-lived threads, so the window never
-//! waits on the network. Each call starts its own Gmail client: drafts are
+//! Saves, discards and sends drafts on short-lived threads, so the window
+//! never waits on the network. Each call starts its own Gmail client: drafts are
 //! rare, and the sync thread may be busy with a long download.
 
 use std::{sync::mpsc::Sender, thread};
@@ -15,6 +15,8 @@ pub enum Finished {
     Saved(String),
     Discarded,
     Failed(String),
+    Sent,
+    SendFailed(String),
 }
 
 pub fn save(
@@ -55,6 +57,32 @@ pub fn discard(
                 Finished::Failed(format!("Gmail kept the draft: {message}"))
             }
             Err(error) => Finished::Failed(format!("Could not discard the draft: {error:#}")),
+        });
+        wake();
+    });
+}
+
+/// Saves and sends a draft you confirmed. Reports the draft ID as soon as it
+/// is saved, then whether the send went through.
+pub fn send(
+    paths: &Paths,
+    from: &str,
+    draft: Draft,
+    existing: Option<String>,
+    done: Sender<Finished>,
+    wake: impl Fn() + Send + 'static,
+) {
+    let paths = paths.clone();
+    let from = from.to_owned();
+    thread::spawn(move || {
+        let result = client(&paths, &from).and_then(|gmail| {
+            compose::send(&gmail, &from, &draft, existing.as_deref(), |draft_id| {
+                let _ = done.send(Finished::Saved(draft_id.to_owned()));
+            })
+        });
+        let _ = done.send(match result {
+            Ok(_) => Finished::Sent,
+            Err(error) => Finished::SendFailed(format!("Not sent: {error:#}")),
         });
         wake();
     });

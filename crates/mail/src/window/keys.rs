@@ -13,6 +13,8 @@ pub enum Focus {
     Picker,
     Help,
     Compose,
+    /// The send confirmation is showing.
+    ConfirmSend,
 }
 
 /// One key press or typed character, taken from egui's events.
@@ -49,6 +51,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("z", "Undo"),
     ("r  a", "Reply, reply all"),
     ("c", "New message"),
+    ("⌘↩", "Send, after you confirm"),
     ("⌘S", "Save the draft to Gmail's Drafts"),
     ("⌘⇧D", "Discard the draft"),
     ("/", "Search"),
@@ -75,6 +78,11 @@ impl Keys {
                 _ => None,
             },
             Focus::Compose => compose_key(press),
+            Focus::ConfirmSend => match press {
+                Press::Key(Key::Enter, _) => Some(Command::Act(Action::ConfirmSend)),
+                Press::Key(Key::Escape, _) => Some(Command::Act(Action::CancelSend)),
+                _ => None,
+            },
             Focus::List => self.list_key(press),
         }
     }
@@ -136,6 +144,9 @@ impl Keys {
 fn compose_key(press: &Press) -> Option<Command> {
     match press {
         Press::Key(Key::S, modifiers) if modifiers.command => Some(Command::Act(Action::SaveDraft)),
+        Press::Key(Key::Enter, modifiers) if modifiers.command => {
+            Some(Command::Act(Action::RequestSend))
+        }
         Press::Key(Key::D, modifiers) if modifiers.command && modifiers.shift => {
             Some(Command::Act(Action::DiscardDraft))
         }
@@ -260,6 +271,27 @@ mod tests {
             Some(Command::Act(Action::OpenHtml))
         );
         assert_eq!(keys.command(&key(Key::H), Focus::Search), None);
+    }
+
+    #[test]
+    fn sending_takes_command_enter_then_a_confirmation() {
+        let mut keys = Keys::default();
+        let command_enter = Press::Key(Key::Enter, Modifiers::COMMAND);
+        assert_eq!(
+            keys.command(&command_enter, Focus::Compose),
+            Some(Command::Act(Action::RequestSend))
+        );
+        // Plain Enter in the body is a new line, never a send.
+        assert_eq!(keys.command(&key(Key::Enter), Focus::Compose), None);
+        assert_eq!(
+            keys.command(&key(Key::Enter), Focus::ConfirmSend),
+            Some(Command::Act(Action::ConfirmSend))
+        );
+        assert_eq!(
+            keys.command(&key(Key::Escape), Focus::ConfirmSend),
+            Some(Command::Act(Action::CancelSend))
+        );
+        assert_eq!(keys.command(&key(Key::E), Focus::ConfirmSend), None);
     }
 
     #[test]

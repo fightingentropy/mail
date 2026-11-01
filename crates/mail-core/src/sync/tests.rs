@@ -349,6 +349,15 @@ impl GmailApi for FakeGmail {
             None => Outcome::Gone,
         })
     }
+
+    fn send_draft(&self, draft_id: &str) -> anyhow::Result<String> {
+        let mut state = self.state.lock().unwrap();
+        state.calls.push(format!("send_draft {draft_id}"));
+        match state.drafts.remove(draft_id) {
+            Some(_) => Ok(format!("sent-{draft_id}")),
+            None => anyhow::bail!("no such draft"),
+        }
+    }
 }
 
 impl FakeGmail {

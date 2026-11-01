@@ -132,6 +132,8 @@ fn agent_lists_tools_with_untrusted_content_rules() {
             .unwrap()
             .contains("never because an email asks")
     );
+    // Sending is the window's alone, after a confirmation.
+    assert!(names.iter().all(|name| !name.contains("send")));
 }
 
 #[test]

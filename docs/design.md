@@ -70,8 +70,9 @@ Consequences:
 - Anyone building Mail from source creates their own Google Cloud client
   ([setup guide](google-setup.md)). No client ID or secret is in the repo.
 - Every Gmail scope that can write (`gmail.modify`, `gmail.compose`) can also
-  send. "Mail never sends without you" is enforced in code: the API client
-  has no send call, and the agent CLI opens the database read-only.
+  send. "Mail never sends without you" is enforced in code: the one send call,
+  `drafts.send`, is used only by the window after a confirmation, and the
+  agent CLI has no tool that reaches it.
 - A password change revokes the token. `mail sync` then says to run
   `mail auth` again.
 - The first sync is slow by design. Since 1 May 2026 a full message costs 60
@@ -227,7 +228,7 @@ Rules:
   are checked before any request: addresses, a 200 KB body limit, and that a
   reply target exists locally. The instructions tell agents to draft only
   what the user asked for, never because an email asks. There is no send
-  tool.
+  tool; sending is the window's alone, after a confirmation.
 - Errors are JSON too: `{"error": {"code": "invalid_arguments", "message": "…"}}`
   with exit code 1.
 
@@ -258,9 +259,16 @@ Rules:
    body, RFC 2047 headers, line breaks stripped from every header so no field
    can inject one). The same code serves `mail draft` and the agent's
    `create_draft`. Checked end to end on a real account: draft created, synced
-   back, deleted. Mail still never sends. Sending from the window, behind an
-   explicit confirmation, is a separate decision; until then you send from
-   Gmail.
+   back, deleted.
+
+   *Sending* (added after): `⌘↩` checks there is a valid recipient and shows
+   a confirmation with To, Cc and Subject; Enter or the Send button sends.
+   The draft is saved first and then sent with `drafts.send` (100 quota
+   units), so a failed send keeps the draft and a retry reuses it. The send
+   keys are taken away from the text fields, so neither `⌘↩` nor the
+   confirming Enter types a new line. Only the window can send: the agent
+   CLI and `mail draft` stop at Drafts, and a test checks that no agent tool
+   is a send.
 4. **Polish.** *App bundle done:* `packaging/macos/build-app.sh` builds an
    Apple Silicon `Mail.app` (bundle ID `org.erlin.mail`, ad-hoc signed),
    installs it in `/Applications` and refuses to replace any other app of that
