@@ -88,6 +88,10 @@ pub enum Action {
     SetScope(Option<i64>),
     /// Starts Google sign-in for another account.
     AddAccount,
+    /// Asks for an image to use as the photo of the account in the header.
+    ChoosePhoto,
+    /// Drops the chosen photo, going back to Google's.
+    UseGooglePhoto,
 }
 
 /// Work for the window shell that the model can't do itself: open a link,
@@ -125,6 +129,9 @@ pub enum Effect {
     },
     /// Google sign-in in the browser, for another account.
     AddAccount,
+    /// Pick an image file for this account's photo.
+    ChoosePhoto(String),
+    UseGooglePhoto(String),
 }
 
 /// Who and what a send goes to, as the confirmation shows it.
@@ -243,6 +250,14 @@ impl Model {
     pub fn own_address(&self, account_id: i64) -> &str {
         self.account(account_id)
             .map_or("", |account| account.email.as_str())
+    }
+
+    /// The account the sidebar header stands for: the one shown, or the
+    /// first when all are.
+    pub fn header_account(&self) -> Option<&Account> {
+        self.scope
+            .and_then(|id| self.account(id))
+            .or(self.accounts.first())
     }
 
     /// The accounts the list shows: the chosen one, or all of them.
@@ -461,11 +476,7 @@ impl Model {
             }
             Action::NewMessage => {
                 // From the account shown, or the first when all are.
-                let from = self
-                    .scope
-                    .and_then(|id| self.account(id))
-                    .or(self.accounts.first());
-                if let Some(from) = from {
+                if let Some(from) = self.header_account() {
                     self.compose = Some(Compose::new_message(&from.email));
                 }
             }
@@ -587,6 +598,15 @@ impl Model {
                 self.reload()?;
             }
             Action::AddAccount => self.effects.push(Effect::AddAccount),
+            Action::ChoosePhoto | Action::UseGooglePhoto => {
+                if let Some(account) = self.header_account() {
+                    let email = account.email.clone();
+                    self.effects.push(match action {
+                        Action::ChoosePhoto => Effect::ChoosePhoto(email),
+                        _ => Effect::UseGooglePhoto(email),
+                    });
+                }
+            }
         }
         Ok(())
     }

@@ -74,6 +74,14 @@ enum Command {
     Labels,
     /// Show the account, the last sync and what is stored.
     Status,
+    /// Use an image as an account's photo in the window, instead of Google's.
+    Photo {
+        /// A JPEG, PNG, HEIC or other image. It is cropped to a square.
+        file: PathBuf,
+        /// Which account; the first signed in if left out.
+        #[arg(long, value_name = "EMAIL")]
+        account: Option<String>,
+    },
     /// JSON tools for coding agents. Each call runs once and exits.
     Agent(agent::AgentArgs),
 }
@@ -112,6 +120,9 @@ fn main() -> ExitCode {
         Some(Command::Thread { thread_id }) => commands::thread(&paths, &thread_id),
         Some(Command::Labels) => commands::labels(&paths),
         Some(Command::Status) => commands::status(&paths),
+        Some(Command::Photo { file, account }) => {
+            commands::photo(&paths, &file, account.as_deref())
+        }
         // The agent CLI reports errors as JSON on stdout.
         Some(Command::Agent(args)) => return agent::run(&paths, args),
     };

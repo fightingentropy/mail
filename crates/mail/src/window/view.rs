@@ -6,7 +6,7 @@ use egui::{
     Stroke, TextEdit, Vec2,
     text::{LayoutJob, TextFormat, TextWrapping},
 };
-use std::{collections::HashMap, fs, ops::Range, path::PathBuf};
+use std::{collections::HashMap, ops::Range, path::PathBuf};
 
 use mail_core::{
     model::{Attachment, LabelKind, Message, ThreadSummary},
@@ -21,7 +21,7 @@ use super::{
     state::{Action, MAILBOXES, Model, SendSummary, View},
     theme::{self, Palette},
 };
-use crate::dates;
+use crate::{accounts, dates};
 
 const ROW_HEIGHT: f32 = 74.0;
 const SIDEBAR_WIDTH: f32 = 228.0;
@@ -95,9 +95,7 @@ impl Screen {
 
 /// Decodes a saved photo into a texture, scaled for a sharp small circle.
 fn load_photo(ctx: &egui::Context, paths: &Paths, email: &str) -> Option<egui::TextureHandle> {
-    let bytes = fs::read(paths.photo(email)).ok()?;
-    let photo = image::load_from_memory(&bytes).ok()?;
-    let photo = photo
+    let photo = accounts::read_photo(paths, email)?
         .resize_to_fill(128, 128, image::imageops::FilterType::Lanczos3)
         .to_rgba8();
     let size = [photo.width() as usize, photo.height() as usize];
@@ -338,9 +336,7 @@ fn account_header(
     let palette = theme::palette(ui.ctx());
     let several = model.accounts.len() > 1;
     let shown = model.scope.and_then(|id| model.account(id));
-    let photo_of = shown
-        .or(model.accounts.first())
-        .map(|account| account.email.clone());
+    let photo_of = model.header_account().map(|account| account.email.clone());
     let name = match shown {
         Some(account) => account.email.clone(),
         None if several => "All".to_owned(),
@@ -447,8 +443,17 @@ fn account_menu(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: 
         }
     }
     ui.separator();
-    if add_account_row(ui) {
+    if menu_row(ui, MenuIcon::Plus, "Add account…") {
         chosen = Some(Action::AddAccount);
+    }
+    if menu_row(ui, MenuIcon::Photo, "Choose photo…") {
+        chosen = Some(Action::ChoosePhoto);
+    }
+    let has_chosen = model
+        .header_account()
+        .is_some_and(|account| screen.paths.chosen_photo(&account.email).exists());
+    if has_chosen && menu_row(ui, MenuIcon::Undo, "Use Google photo") {
+        chosen = Some(Action::UseGooglePhoto);
     }
     if let Some(action) = chosen {
         actions.push(action);
@@ -511,31 +516,50 @@ fn account_row(
         .clicked()
 }
 
-/// "Add account…", lined up with the account rows. Returns true when clicked.
-fn add_account_row(ui: &mut egui::Ui) -> bool {
+enum MenuIcon {
+    Plus,
+    Photo,
+    Undo,
+}
+
+/// A command in the account menu, lined up with the account rows, its icon
+/// drawn in a ring where a photo would be. Returns true when clicked.
+fn menu_row(ui: &mut egui::Ui, icon: MenuIcon, text: &str) -> bool {
     let palette = theme::palette(ui.ctx());
     let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
     if response.hovered() {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(6), palette.hover);
     }
     let center = Pos2::new(rect.left() + 20.0, rect.center().y);
-    ui.painter()
-        .circle_stroke(center, 11.5, Stroke::new(1.0, palette.dim));
-    let plus = Stroke::new(1.4, palette.secondary);
-    ui.painter().line_segment(
-        [center - Vec2::new(5.0, 0.0), center + Vec2::new(5.0, 0.0)],
-        plus,
-    );
-    ui.painter().line_segment(
-        [center - Vec2::new(0.0, 5.0), center + Vec2::new(0.0, 5.0)],
-        plus,
-    );
-    ui.painter().text(
+    let painter = ui.painter();
+    painter.circle_stroke(center, 11.5, Stroke::new(1.0, palette.dim));
+    let stroke = Stroke::new(1.4, palette.secondary);
+    let line = |from: Vec2, to: Vec2| painter.line_segment([center + from, center + to], stroke);
+    match icon {
+        MenuIcon::Plus => {
+            line(Vec2::new(-5.0, 0.0), Vec2::new(5.0, 0.0));
+            line(Vec2::new(0.0, -5.0), Vec2::new(0.0, 5.0));
+        }
+        // A head and shoulders.
+        MenuIcon::Photo => {
+            painter.circle_stroke(center - Vec2::Y * 2.5, 2.8, stroke);
+            line(Vec2::new(-5.0, 6.0), Vec2::new(-3.0, 2.5));
+            line(Vec2::new(-3.0, 2.5), Vec2::new(3.0, 2.5));
+            line(Vec2::new(3.0, 2.5), Vec2::new(5.0, 6.0));
+        }
+        // An arrow pointing back.
+        MenuIcon::Undo => {
+            line(Vec2::new(-5.0, 0.0), Vec2::new(5.0, 0.0));
+            line(Vec2::new(-5.0, 0.0), Vec2::new(-1.5, -3.5));
+            line(Vec2::new(-5.0, 0.0), Vec2::new(-1.5, 3.5));
+        }
+    }
+    painter.text(
         Pos2::new(rect.left() + 42.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
-        "Add account…",
+        text,
         theme::regular(14.5),
         palette.text,
     );
@@ -1517,6 +1541,8 @@ pub(super) fn overlay_frame(palette: &Palette) -> egui::Frame {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
@@ -1535,5 +1561,33 @@ mod tests {
             .unwrap();
         let texture = load_photo(&ctx, &paths, "Me@Example.com").expect("decodes");
         assert_eq!(texture.size(), [128, 128]);
+    }
+
+    #[test]
+    fn a_chosen_photo_wins_over_googles_and_loses_its_metadata() {
+        let folder = tempfile::tempdir().unwrap();
+        let paths = Paths::under(folder.path());
+        let google = paths.photo("me@example.com");
+        fs::create_dir_all(google.parent().unwrap()).unwrap();
+        image::RgbImage::from_pixel(96, 96, image::Rgb([0, 0, 255]))
+            .save_with_format(&google, image::ImageFormat::Jpeg)
+            .unwrap();
+
+        // A portrait photo, as from a phone: cropped to its middle square.
+        let source = folder.path().join("selfie.jpg");
+        image::RgbImage::from_pixel(300, 400, image::Rgb([220, 30, 30]))
+            .save_with_format(&source, image::ImageFormat::Jpeg)
+            .unwrap();
+        accounts::choose_photo(&paths, "me@example.com", &source).unwrap();
+        let chosen = image::open(paths.chosen_photo("me@example.com")).unwrap();
+        assert_eq!((chosen.width(), chosen.height()), (256, 256));
+
+        let shown = accounts::read_photo(&paths, "me@example.com")
+            .unwrap()
+            .to_rgb8();
+        assert!(
+            shown.get_pixel(128, 128)[0] > 150,
+            "the chosen photo, not Google's"
+        );
     }
 }

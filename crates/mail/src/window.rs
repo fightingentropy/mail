@@ -102,6 +102,7 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
             });
             let (drafts_done, drafts) = mpsc::channel();
             let (sign_ins_done, sign_ins) = mpsc::channel();
+            let (photos_done, photos) = mpsc::channel();
             let status = if demo {
                 SyncStatus::Demo
             } else {
@@ -117,6 +118,8 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
                 drafts_done,
                 sign_ins,
                 sign_ins_done,
+                photos,
+                photos_done,
                 downloader,
                 screenshot: screenshot.map(|path| Screenshot { path, frames: 0 }),
                 script,
@@ -144,6 +147,10 @@ struct Shell {
     /// Results of "Add account…": the new account's address, or the error.
     sign_ins: Receiver<Result<String, String>>,
     sign_ins_done: Sender<Result<String, String>>,
+    /// Results of "Choose photo…": the account's address once its photo is
+    /// saved, `None` if you cancelled, or the error.
+    photos: Receiver<Result<Option<String>, String>>,
+    photos_done: Sender<Result<Option<String>, String>>,
     /// `None` in the demo, which has no Gmail to download from.
     downloader: Option<Downloader>,
     screenshot: Option<Screenshot>,
@@ -176,6 +183,7 @@ impl eframe::App for Shell {
         self.receive_draft_results();
         self.receive_downloads();
         self.receive_sign_ins();
+        self.receive_photos();
         if let Some(syncer) = &self.syncer
             && (std::mem::take(&mut self.model.wants_sync)
                 || std::mem::take(&mut self.screen.sync_requested))
@@ -258,6 +266,20 @@ impl Shell {
                 }
                 Event::Failed(error) => self.screen.status = SyncStatus::Failed(error),
                 Event::Photo(email) => self.screen.forget_photo(&email),
+            }
+        }
+    }
+
+    fn receive_photos(&mut self) {
+        let results: Vec<Result<Option<String>, String>> = self.photos.try_iter().collect();
+        for result in results {
+            match result {
+                Ok(Some(email)) => {
+                    self.screen.forget_photo(&email);
+                    self.model.notify("Photo updated.".into());
+                }
+                Ok(None) => {}
+                Err(error) => self.model.notify(error),
             }
         }
     }
@@ -363,6 +385,15 @@ impl Shell {
                     None
                 }
                 Effect::AddAccount => self.add_account(ctx),
+                Effect::ChoosePhoto(email) => {
+                    self.choose_photo(ctx, email);
+                    None
+                }
+                Effect::UseGooglePhoto(email) => {
+                    let _ = fs::remove_file(self.paths.chosen_photo(&email));
+                    self.screen.forget_photo(&email);
+                    None
+                }
                 Effect::OpenHtml { message_id, html } => {
                     Some(match files::open_html(&message_id, &html) {
                         Ok(_) => "Opened the HTML version in your browser.".to_owned(),
@@ -434,6 +465,25 @@ impl Shell {
             self.drafts_done.clone(),
             move || wake.request_repaint(),
         );
+    }
+
+    /// Asks for an image with the macOS file picker, on a thread of its own
+    /// so the window keeps drawing.
+    fn choose_photo(&mut self, ctx: &egui::Context, email: String) {
+        let paths = self.paths.clone();
+        let done = self.photos_done.clone();
+        let wake = ctx.clone();
+        thread::spawn(move || {
+            let result = match files::choose_image("Choose a photo for this account") {
+                Ok(Some(path)) => accounts::choose_photo(&paths, &email, &path)
+                    .map(|()| Some(email))
+                    .map_err(|error| format!("Could not use that photo: {error:#}")),
+                Ok(None) => Ok(None),
+                Err(error) => Err(format!("{error:#}")),
+            };
+            let _ = done.send(result);
+            wake.request_repaint();
+        });
     }
 
     /// Google sign-in runs in the browser; the window waits on a thread of

@@ -110,7 +110,10 @@ new message comes from the account shown (the first one when all are).
 
 The sidebar shows each account's Google profile photo. Accounts signed in
 before Mail asked to see it show their initial until you sign in to them
-again: **Add account…** and pick the same account.
+again: **Add account…** and pick the same account. To use a different
+picture, choose **Choose photo…** in the same menu (or run `mail photo
+<file>`); it is cropped to a square, saved without its metadata, and kept
+over Google's until you choose **Use Google photo**.
 
 Triage applies locally at once and waits in a queue until the next sync sends
 it to Gmail, so it works offline too.

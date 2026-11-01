@@ -102,6 +102,25 @@ fn html_page(html: &str) -> String {
 
 /// Runs `open` on a thread of its own, so a slow Launch Services lookup
 /// never stalls the window.
+/// Asks for an image with the macOS file picker. `None` if you cancel.
+/// Blocks until you choose, so call it off the window's thread.
+pub fn choose_image(prompt: &str) -> anyhow::Result<Option<PathBuf>> {
+    // The prompt is ours, never text from mail, so quoting it is safe.
+    let script = format!(
+        "POSIX path of (choose file with prompt \"{prompt}\" of type {{\"public.image\"}})"
+    );
+    let output = Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .context("Could not show the file picker")?;
+    // Cancelling makes osascript fail with "User canceled".
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok((!path.is_empty()).then(|| PathBuf::from(path)))
+}
+
 fn open<const N: usize>(args: [OsString; N]) {
     thread::spawn(move || {
         if let Err(error) = Command::new("open").args(args).status() {

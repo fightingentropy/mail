@@ -39,16 +39,31 @@ impl Paths {
 
     /// An account's Google profile photo, saved after sign-in or sync.
     pub fn photo(&self, email: &str) -> PathBuf {
-        let name: String = email
-            .to_lowercase()
-            .chars()
-            .map(|c| match c {
-                'a'..='z' | '0'..='9' | '@' | '.' | '-' | '_' | '+' => c,
-                _ => '_',
-            })
-            .collect();
-        self.root.join("photos").join(name)
+        self.photos_folder().join(photo_name(email))
     }
+
+    /// A photo you chose for an account. It wins over Google's, and sync
+    /// never replaces it.
+    pub fn chosen_photo(&self, email: &str) -> PathBuf {
+        self.photos_folder()
+            .join(format!("{}.chosen.png", photo_name(email)))
+    }
+
+    fn photos_folder(&self) -> PathBuf {
+        self.root.join("photos")
+    }
+}
+
+/// An address as a safe file name.
+fn photo_name(email: &str) -> String {
+    email
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | '0'..='9' | '@' | '.' | '-' | '_' | '+' => c,
+            _ => '_',
+        })
+        .collect()
 }
 
 /// Your Downloads folder, where opened attachments are saved.

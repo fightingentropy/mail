@@ -59,6 +59,26 @@ pub fn auth(paths: &Paths, client_file: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Saves an image as an account's photo. An open window shows it after it
+/// is opened again.
+pub fn photo(paths: &Paths, file: &Path, account: Option<&str>) -> anyhow::Result<()> {
+    let store = Store::open(&paths.database())?;
+    let email = match account {
+        Some(email) => {
+            store
+                .accounts()?
+                .into_iter()
+                .find(|stored| stored.email.eq_ignore_ascii_case(email))
+                .with_context(|| format!("{email} is not signed in. Run `mail auth` to add it."))?
+                .email
+        }
+        None => signed_in(&store)?.email,
+    };
+    accounts::choose_photo(paths, &email, file)?;
+    println!("Set the photo for {email}.");
+    Ok(())
+}
+
 /// Syncs every signed-in account, one after another.
 pub fn sync(paths: &Paths, days: u32) -> anyhow::Result<()> {
     let mut store = Store::open(&paths.database())?;

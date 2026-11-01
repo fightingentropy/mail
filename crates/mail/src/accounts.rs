@@ -1,8 +1,10 @@
 //! Signing accounts in, connecting to them, and keeping their profile
 //! photos. The command line and the window share these.
 
-use std::fs;
+use std::{fs, io::Cursor, path::Path, process::Command};
 
+use anyhow::Context;
+use image::{DynamicImage, ImageDecoder, ImageReader, imageops::FilterType};
 use mail_core::{
     auth::{self, OAuthClient, keychain},
     gmail::{self, GmailApi, GmailClient},
@@ -50,4 +52,60 @@ pub fn save_photo(paths: &Paths, gmail: &GmailClient, email: &str) -> anyhow::Re
     }
     fs::write(&path, bytes)?;
     Ok(true)
+}
+
+/// The account's photo: the one you chose, else Google's.
+pub fn read_photo(paths: &Paths, email: &str) -> Option<DynamicImage> {
+    [paths.chosen_photo(email), paths.photo(email)]
+        .iter()
+        .find_map(|path| decode(&fs::read(path).ok()?).ok())
+}
+
+/// Makes `source` the account's photo. It is cropped to a square and saved
+/// as a small PNG, which also drops metadata such as where it was taken.
+/// HEIC and other formats Mail can't read go through macOS `sips` first.
+pub fn choose_photo(paths: &Paths, email: &str, source: &Path) -> anyhow::Result<()> {
+    let bytes = fs::read(source).with_context(|| format!("Could not read {}", source.display()))?;
+    let photo = match decode(&bytes) {
+        Ok(photo) => photo,
+        Err(_) => decode(&converted_by_sips(source)?).context("Mail can't read that image")?,
+    };
+    let square = photo.resize_to_fill(256, 256, FilterType::Lanczos3);
+    let path = paths.chosen_photo(email);
+    if let Some(folder) = path.parent() {
+        fs::create_dir_all(folder)?;
+    }
+    square
+        .to_rgb8()
+        .save_with_format(&path, image::ImageFormat::Png)?;
+    Ok(())
+}
+
+/// Decodes an image the right way up: phones store photos sideways with an
+/// orientation tag.
+fn decode(bytes: &[u8]) -> anyhow::Result<DynamicImage> {
+    let mut decoder = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()?
+        .into_decoder()?;
+    let orientation = decoder.orientation()?;
+    let mut photo = DynamicImage::from_decoder(decoder)?;
+    photo.apply_orientation(orientation);
+    Ok(photo)
+}
+
+fn converted_by_sips(source: &Path) -> anyhow::Result<Vec<u8>> {
+    let folder = std::env::temp_dir().join(format!("mail-photo-{}", std::process::id()));
+    fs::create_dir_all(&folder)?;
+    let out = folder.join("photo.jpg");
+    let status = Command::new("sips")
+        .args(["-s", "format", "jpeg"])
+        .arg(source)
+        .arg("--out")
+        .arg(&out)
+        .output()?
+        .status;
+    anyhow::ensure!(status.success(), "Mail can't read that image");
+    let bytes = fs::read(&out)?;
+    let _ = fs::remove_dir_all(&folder);
+    Ok(bytes)
 }
