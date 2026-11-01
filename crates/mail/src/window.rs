@@ -11,6 +11,7 @@ mod drafts;
 mod files;
 mod keys;
 mod links;
+mod original;
 mod script;
 mod shortcuts;
 mod state;
@@ -33,6 +34,7 @@ use crate::accounts;
 use background::{Event, Syncer};
 use downloads::Downloader;
 use drafts::Finished;
+use original::{Original, Page};
 use state::{Action, Effect, Model};
 use view::{Screen, SyncStatus};
 
@@ -65,7 +67,10 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
     store
         .account()?
         .context("Not signed in. Run `mail auth --client <file>` in Terminal first.")?;
-    let model = Model::new(store)?;
+    let mut model = Model::new(store)?;
+    // A screenshot captures what egui draws, and WebKit draws apart from it.
+    let originals = options.screenshot.is_none();
+    model.show_original = originals;
 
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -108,9 +113,12 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
             } else {
                 SyncStatus::Working("Syncing…".into())
             };
+            let mut screen = Screen::new(status, paths.clone());
+            screen.original_available = originals;
             Ok(Box::new(Shell {
                 model,
-                screen: Screen::new(status, paths.clone()),
+                original: originals.then(Original::new),
+                screen,
                 syncer,
                 paths,
                 demo,
@@ -137,6 +145,8 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
 
 struct Shell {
     model: Model,
+    /// The WebKit view for originals; `None` for screenshots.
+    original: Option<Original>,
     screen: Screen,
     syncer: Option<Syncer>,
     paths: Paths,
@@ -167,6 +177,10 @@ struct Screenshot {
 impl eframe::App for Shell {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         self.frames += 1;
+        // Keys pressed while the original had focus.
+        if let Some(original) = &self.original {
+            input.events.extend(original.take_keys());
+        }
         if !self.script.is_empty() {
             ctx.request_repaint();
             if self.frames > 10
@@ -203,9 +217,10 @@ impl eframe::App for Shell {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         view::draw(ui, &mut self.model, &mut self.screen);
         let ctx = ui.ctx().clone();
+        self.place_original(&ctx, frame);
         self.carry_out_effects(&ctx);
     }
 
@@ -216,6 +231,46 @@ impl eframe::App for Shell {
 }
 
 impl Shell {
+    /// Puts the WebKit view where the reader left room for it, or hides it.
+    /// It draws over the window, so menus and overlays hide it too.
+    fn place_original(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(original) = &mut self.original else {
+            return;
+        };
+        let covered =
+            ctx.any_popup_open() || ctx.memory(|memory| memory.top_modal_layer().is_some());
+        let scroll = self.screen.scroll_original.take();
+        let (Some(rect), Some(html), false) = (
+            self.screen.original_rect,
+            self.model.showing_original(),
+            covered,
+        ) else {
+            original.hide();
+            return;
+        };
+        let page = Page {
+            message_id: html.message_id.clone(),
+            images: html.images,
+        };
+        let shown = original.show(frame, ctx, rect, &page, || html.html.clone());
+        if let Err(error) = shown {
+            // Fall back to text for good rather than try every frame.
+            self.original = None;
+            self.model.show_original = false;
+            self.screen.original_available = false;
+            self.model
+                .notify(format!("Could not show the original: {error:#}"));
+            return;
+        }
+        if let Some(pages) = scroll {
+            original.scroll(pages);
+        }
+        // Typing in search goes to the window, not to the page.
+        if ctx.egui_wants_keyboard_input() {
+            original.release_focus();
+        }
+    }
+
     fn receive_sync_events(&mut self) {
         let events: Vec<Event> = match &self.syncer {
             Some(syncer) => syncer.events.try_iter().collect(),

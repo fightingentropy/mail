@@ -84,6 +84,10 @@ pub enum Action {
     },
     /// Shows the newest expanded message's HTML in the browser.
     OpenHtml,
+    /// Switches between a message's original layout and its text.
+    ToggleOriginal,
+    /// Lets the original fetch its remote images.
+    LoadImages,
     /// Shows one account's mail, or every account's with `None`.
     SetScope(Option<i64>),
     /// Starts Google sign-in for another account.
@@ -142,10 +146,21 @@ pub struct SendSummary {
     pub subject: String,
 }
 
+/// A message's HTML, for showing it as it was designed.
+pub struct OriginalHtml {
+    pub message_id: String,
+    pub html: String,
+    /// Remote images may load: they tell the sender you opened it.
+    pub images: bool,
+}
+
 /// The thread in the reader.
 pub struct OpenThread {
     pub account_id: i64,
     pub thread_id: String,
+    /// The HTML of a thread that is one message, as newsletters and
+    /// receipts are. Conversations read as text.
+    pub original: Option<OriginalHtml>,
     pub subject: String,
     pub messages: Vec<Message>,
     pub expanded: Vec<bool>,
@@ -177,6 +192,8 @@ pub struct Model {
     /// The name each account signs its mail with, once one is stored.
     names: HashMap<i64, String>,
     pub view: View,
+    /// Show a message's original layout when it has one, rather than text.
+    pub show_original: bool,
     /// The mailbox to return to when a search is cleared.
     mailbox: String,
     pub threads: Vec<ThreadSummary>,
@@ -213,6 +230,7 @@ impl Model {
             unread: HashMap::new(),
             names: HashMap::new(),
             view: View::Mailbox("INBOX".into()),
+            show_original: true,
             mailbox: "INBOX".into(),
             threads: Vec::new(),
             selected: 0,
@@ -243,6 +261,14 @@ impl Model {
             .filter_map(|account| self.store.pending_changes(account.id).ok())
             .map(|pending| pending.len())
             .sum()
+    }
+
+    /// The original the reader shows instead of text, if any.
+    pub fn showing_original(&self) -> Option<&OriginalHtml> {
+        if !self.show_original || self.compose.is_some() {
+            return None;
+        }
+        self.open.as_ref()?.original.as_ref()
     }
 
     pub fn account(&self, id: i64) -> Option<&Account> {
@@ -616,6 +642,22 @@ impl Model {
                 self.reload()?;
             }
             Action::AddAccount => self.effects.push(Effect::AddAccount),
+            Action::ToggleOriginal => {
+                if self
+                    .open
+                    .as_ref()
+                    .is_some_and(|open| open.original.is_some())
+                {
+                    self.show_original = !self.show_original;
+                } else {
+                    self.notify("This one reads as text. h opens its HTML in your browser.".into());
+                }
+            }
+            Action::LoadImages => {
+                if let Some(original) = self.open.as_mut().and_then(|open| open.original.as_mut()) {
+                    original.images = true;
+                }
+            }
             Action::ChoosePhoto | Action::UseGooglePhoto => {
                 if let Some(account) = self.header_account() {
                     let email = account.email.clone();
@@ -893,8 +935,20 @@ impl Model {
             .enumerate()
             .map(|(index, message)| index == last || message.has_label("UNREAD"))
             .collect();
+        let original = match messages.as_slice() {
+            [message] if message.has_html => self
+                .store
+                .message_html(account, &message.gmail_id)?
+                .map(|html| OriginalHtml {
+                    message_id: message.gmail_id.clone(),
+                    html,
+                    images: false,
+                }),
+            _ => None,
+        };
         self.open = Some(OpenThread {
             account_id: account,
+            original,
             thread_id: summary.thread_id.clone(),
             subject: summary.subject.clone(),
             messages,

@@ -82,6 +82,7 @@ Gmail's letters and the usual macOS chords both work:
 | `r` / `a` / `c` | `⌘R` / `⇧⌘R` / `⌘N` | Reply, reply all, new message |
 | | `⌘K` | Search, live as you type |
 | Space | | Scroll the conversation |
+| `v` | | Switch a message between its original look and text |
 | `h` | | Open the message's HTML version in your browser |
 | `g` then `i` `s` `t` `d` `a` | | Inbox, Starred, Sent, Drafts, All mail |
 | | `⌘↩` | Send, after a confirmation showing who it goes to |
@@ -119,8 +120,15 @@ over Google's until you choose **Use Google photo**.
 Triage applies locally at once and waits in a queue until the next sync sends
 it to Gmail, so it works offline too.
 
-The reader shows mail as plain text. Web and email links are in blue: hover
-one to see its full address, click to open it. Newsletters often send a
+A message on its own, such as a receipt or a newsletter, shows as it was
+designed, the way Gmail shows it, in macOS's own WebKit. Mail keeps control:
+scripts never run, links open in your browser, and remote images stay off
+until you click **Load images**, because loading them tells the sender you
+opened the message. `v` (or **Show as text**) switches to the text reader.
+Conversations read as text.
+
+The text reader shows mail as plain text. Web and email links are in blue:
+hover one to see its full address, click to open it. Newsletters often send a
 "plain text" version that is their HTML with the tags stripped out, full of
 gaps and tracking links; Mail spots those and reads the HTML instead, so you
 get the words with "Track your order" itself clickable. A long address left

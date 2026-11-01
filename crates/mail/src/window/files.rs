@@ -89,7 +89,12 @@ fn html_page(html: &str) -> String {
         "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'; ",
         "object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'\">\n",
     );
-    // A doctype must stay first, or the browser falls back to quirks mode.
+    with_head(html, HEAD)
+}
+
+/// Puts `head` at the top of a message's HTML: before everything but a
+/// doctype, which must stay first or WebKit falls back to quirks mode.
+pub fn with_head(html: &str, head: &str) -> String {
     let trimmed = html.trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n']);
     let after_doctype = trimmed
         .get(..9)
@@ -97,11 +102,9 @@ fn html_page(html: &str) -> String {
         .and_then(|_| trimmed.find('>'))
         .map_or(0, |end| end + 1);
     let (doctype, rest) = trimmed.split_at(after_doctype);
-    format!("{doctype}{HEAD}{rest}")
+    format!("{doctype}{head}{rest}")
 }
 
-/// Runs `open` on a thread of its own, so a slow Launch Services lookup
-/// never stalls the window.
 /// Asks for an image with the macOS file picker. `None` if you cancel.
 /// Blocks until you choose, so call it off the window's thread.
 pub fn choose_image(prompt: &str) -> anyhow::Result<Option<PathBuf>> {
@@ -121,6 +124,8 @@ pub fn choose_image(prompt: &str) -> anyhow::Result<Option<PathBuf>> {
     Ok((!path.is_empty()).then(|| PathBuf::from(path)))
 }
 
+/// Runs `open` on a thread of its own, so a slow Launch Services lookup
+/// never stalls the window.
 fn open<const N: usize>(args: [OsString; N]) {
     thread::spawn(move || {
         if let Err(error) = Command::new("open").args(args).status() {

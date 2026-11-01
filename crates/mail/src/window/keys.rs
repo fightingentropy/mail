@@ -86,6 +86,7 @@ pub enum Bindable {
     Label,
     Undo,
     OpenHtml,
+    ToggleOriginal,
     ScrollDown,
     ScrollUp,
     Reply,
@@ -107,7 +108,7 @@ pub enum Bindable {
 
 impl Bindable {
     /// In the order the overlay and Settings list them.
-    pub const ALL: [Bindable; 26] = [
+    pub const ALL: [Bindable; 27] = [
         Bindable::Next,
         Bindable::Previous,
         Bindable::Archive,
@@ -117,6 +118,7 @@ impl Bindable {
         Bindable::Label,
         Bindable::Undo,
         Bindable::OpenHtml,
+        Bindable::ToggleOriginal,
         Bindable::ScrollDown,
         Bindable::ScrollUp,
         Bindable::Reply,
@@ -148,6 +150,7 @@ impl Bindable {
             Bindable::Label => "label",
             Bindable::Undo => "undo",
             Bindable::OpenHtml => "open_html",
+            Bindable::ToggleOriginal => "toggle_original",
             Bindable::ScrollDown => "scroll_down",
             Bindable::ScrollUp => "scroll_up",
             Bindable::Reply => "reply",
@@ -178,7 +181,8 @@ impl Bindable {
             Bindable::ToggleStar => "Star or unstar",
             Bindable::Label => "Add or remove a label",
             Bindable::Undo => "Undo",
-            Bindable::OpenHtml => "Open the HTML version",
+            Bindable::OpenHtml => "Open the HTML version in your browser",
+            Bindable::ToggleOriginal => "Show the original or the text",
             Bindable::ScrollDown => "Scroll down",
             Bindable::ScrollUp => "Scroll up",
             Bindable::Reply => "Reply",
@@ -240,6 +244,7 @@ impl Bindable {
             Bindable::Label => act(Action::OpenPicker),
             Bindable::Undo => act(Action::Undo),
             Bindable::OpenHtml => act(Action::OpenHtml),
+            Bindable::ToggleOriginal => act(Action::ToggleOriginal),
             Bindable::ScrollDown => Command::ScrollReader(1.0),
             Bindable::ScrollUp => Command::ScrollReader(-1.0),
             Bindable::Reply => act(Action::Reply),
@@ -272,6 +277,7 @@ impl Bindable {
             Bindable::Label => &["l"],
             Bindable::Undo => &["z", "cmd+z"],
             Bindable::OpenHtml => &["h"],
+            Bindable::ToggleOriginal => &["v"],
             Bindable::ScrollDown => &["space"],
             Bindable::ScrollUp => &["shift+space"],
             Bindable::Reply => &["r", "cmd+r"],

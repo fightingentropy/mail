@@ -274,6 +274,22 @@ Rules:
    address on hover, opened only on a click), attachments on demand, the HTML
    view, and a light palette that follows the macOS appearance.
 
+   *Originals* (added after): a thread that is one message with HTML (a
+   receipt, a newsletter) shows that HTML in a WKWebView, through `wry`,
+   placed as a child view over the reader below Mail's own header. Pages are
+   served from a private `mail://` scheme so the content policy arrives as a
+   response header (`default-src 'none'`, inline styles, `data:` images, and
+   remote images only after "Load images"); the scheme answers only the
+   page's own path. The navigation handler allows nothing but those pages
+   and hands web and email links to the browser. An init script forwards
+   key presses to the window over IPC, so shortcuts work while the page has
+   focus (⌘C and ⌘A stay with it); `wry` drops IPC from pages whose address
+   it can't parse, such as `about:blank`, which is another reason for the
+   scheme. WebKit draws above the GL surface, so the view hides whenever an
+   egui modal or popup is open, and screenshots (which capture only egui)
+   use the text reader. Checked on a real newsletter: 18 images, none
+   fetched until allowed.
+
    *Readable newsletters* (added after): a text part is kept as written
    unless it looks machine-made (leftover `&nbsp;`, markup indentation, four
    or more empty lines in a row, five or more tracking links over 80

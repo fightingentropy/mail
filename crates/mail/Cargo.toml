@@ -24,6 +24,8 @@ jiff = "0.2"
 # The window. OpenGL only; persistence remembers the window's size and place.
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "persistence"] }
 egui = "0.36"
+# Shows a message's original HTML in the reader, in macOS's own WebKit.
+wry = { version = "0.57", default-features = false }
 # Saves demo screenshots, and decodes profile photos (JPEG or WebP from Google).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 

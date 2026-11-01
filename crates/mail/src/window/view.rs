@@ -18,7 +18,7 @@ use super::{
     keys::{Bindable, Command, Focus, Keymap, Keys, Press},
     links,
     shortcuts::{self, Settings},
-    state::{Action, MAILBOXES, Model, SendSummary, View},
+    state::{Action, MAILBOXES, Model, OpenThread, OriginalHtml, SendSummary, View},
     theme::{self, Palette},
 };
 use crate::{accounts, dates};
@@ -53,6 +53,12 @@ pub struct Screen {
     reader_offset: f32,
     reader_height: f32,
     reader_target: Option<f32>,
+    /// Where the original's WebKit view goes this frame; the shell places it.
+    pub original_rect: Option<egui::Rect>,
+    /// Pages to scroll the original by, for Space; the shell does it.
+    pub scroll_original: Option<f32>,
+    /// False when originals can't be shown, as in screenshots.
+    pub original_available: bool,
     pub status: SyncStatus,
     pub sync_requested: bool,
 }
@@ -74,6 +80,9 @@ impl Screen {
             reader_offset: 0.0,
             reader_height: 0.0,
             reader_target: None,
+            original_rect: None,
+            scroll_original: None,
+            original_available: true,
             status,
             sync_requested: false,
         }
@@ -108,6 +117,7 @@ fn load_photo(ctx: &egui::Context, paths: &Paths, email: &str) -> Option<egui::T
 }
 
 pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
+    screen.original_rect = None;
     let palette = theme::palette(ui.ctx());
     let mut actions = Vec::new();
     handle_keys(ui.ctx(), model, screen, &mut actions);
@@ -243,6 +253,7 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
             Some(Command::ScrollReader(direction)) => {
                 let page = (screen.reader_height * 0.85).max(200.0);
                 screen.reader_target = Some((screen.reader_offset + direction * page).max(0.0));
+                screen.scroll_original = Some(direction);
             }
             Some(Command::SyncNow) => screen.sync_requested = true,
             Some(Command::OpenSettings) => screen.settings = Some(Settings::default()),
@@ -995,6 +1006,9 @@ fn reader(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut V
         });
         return;
     };
+    if let Some(original) = model.showing_original() {
+        return original_reader(ui, model, open, original, screen, actions);
+    }
 
     let mut area = ScrollArea::vertical()
         .id_salt(("reader", &open.thread_id))
@@ -1036,6 +1050,22 @@ fn reader(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut V
                             .color(palette.accent),
                     );
                 }
+                // A message with an original, read as text for now.
+                if open.original.is_some() && screen.original_available {
+                    ui.add_space(8.0);
+                    let toggle = screen.keys.keymap.hint(Bindable::ToggleOriginal);
+                    let label = if toggle.is_empty() {
+                        "Show original".to_owned()
+                    } else {
+                        format!("Show original   {toggle}")
+                    };
+                    if ui
+                        .button(RichText::new(label).font(theme::regular(13.5)))
+                        .clicked()
+                    {
+                        actions.push(Action::ToggleOriginal);
+                    }
+                }
                 ui.add_space(18.0);
 
                 for (index, message) in open.messages.iter().enumerate() {
@@ -1063,6 +1093,88 @@ fn reader(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut V
     });
     screen.reader_offset = output.state.offset.y;
     screen.reader_height = output.inner_rect.height();
+}
+
+/// A message shown as it was designed: Mail draws the subject and sender,
+/// and WebKit draws the message below them, in the rect left for it.
+fn original_reader(
+    ui: &mut egui::Ui,
+    model: &Model,
+    open: &OpenThread,
+    original: &OriginalHtml,
+    screen: &mut Screen,
+    actions: &mut Vec<Action>,
+) {
+    let palette = theme::palette(ui.ctx());
+    let Some(message) = open.messages.first() else {
+        return;
+    };
+    let panel = ui.max_rect();
+    let side = ((ui.available_width() - READING_WIDTH) / 2.0).clamp(36.0, 120.0);
+    let column = egui::Rect::from_min_max(
+        Pos2::new(panel.left() + side, panel.top() + 30.0),
+        Pos2::new(panel.right() - side, panel.bottom() - 16.0),
+    );
+    let mut header = ui.new_child(egui::UiBuilder::new().max_rect(column));
+    let ui = &mut header;
+    ui.add(
+        egui::Label::new(
+            RichText::new(subject_or_placeholder(&open.subject)).font(theme::semibold(26.0)),
+        )
+        .wrap(),
+    );
+    ui.add_space(16.0);
+    let own_address = model.own_address(open.account_id);
+    let address = (!message.from_name.is_empty()
+        && !message.from_addr.eq_ignore_ascii_case(own_address))
+    .then(|| format!("<{}>", message.from_addr));
+    message_header(ui, message, own_address, address.as_deref());
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!("to {}", message.to))
+                .font(theme::regular(13.5))
+                .color(palette.dim),
+        )
+        .truncate(),
+    );
+    ui.add_space(12.0);
+    let toggle = screen.keys.keymap.hint(Bindable::ToggleOriginal);
+    ui.horizontal(|ui| {
+        if !original.images {
+            ui.label(
+                RichText::new("Images are off, so the sender can't see you opened this.")
+                    .font(theme::regular(13.5))
+                    .color(palette.dim),
+            );
+            if ui
+                .button(RichText::new("Load images").font(theme::regular(13.5)))
+                .clicked()
+            {
+                actions.push(Action::LoadImages);
+            }
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let label = if toggle.is_empty() {
+                "Show as text".to_owned()
+            } else {
+                format!("Show as text   {toggle}")
+            };
+            if ui
+                .button(RichText::new(label).font(theme::regular(13.5)))
+                .clicked()
+            {
+                actions.push(Action::ToggleOriginal);
+            }
+        });
+    });
+    ui.add_space(10.0);
+
+    let top = ui.min_rect().bottom();
+    let page = egui::Rect::from_min_max(Pos2::new(column.left(), top), column.max);
+    // White paper under WebKit, so nothing flashes while it loads.
+    ui.painter()
+        .rect_filled(page, CornerRadius::ZERO, Color32::WHITE);
+    screen.original_rect = Some(page);
 }
 
 fn sender_label(message: &Message, own_address: &str) -> String {
