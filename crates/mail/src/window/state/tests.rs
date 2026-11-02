@@ -418,6 +418,7 @@ fn sending_asks_for_confirmation_first() {
     let summary = model.confirm_send.clone().unwrap();
     assert_eq!(summary.to, "Maya <maya@fastmail.test>");
     assert_eq!(summary.subject, "Friday");
+    assert_eq!(summary.from, None, "one account goes without saying");
 
     model.apply(Action::CancelSend).unwrap();
     assert!(model.confirm_send.is_none());
@@ -580,6 +581,88 @@ fn new_mail_comes_from_the_account_shown() {
     model.apply(Action::SetScope(Some(work))).unwrap();
     model.apply(Action::NewMessage).unwrap();
     assert_eq!(model.compose.take().unwrap().from, demo::WORK_ADDRESS);
+}
+
+#[test]
+fn a_new_message_can_come_from_another_account() {
+    let (mut model, _folder) = two_accounts();
+    compose_to(&mut model, "maya@fastmail.test");
+    model
+        .apply(Action::SetFrom(demo::WORK_ADDRESS.into()))
+        .unwrap();
+    assert_eq!(model.compose.as_ref().unwrap().from, demo::WORK_ADDRESS);
+    // Only your own accounts.
+    model
+        .apply(Action::SetFrom("someone@else.example".into()))
+        .unwrap();
+    assert_eq!(model.compose.as_ref().unwrap().from, demo::WORK_ADDRESS);
+
+    model.apply(Action::RequestSend).unwrap();
+    let summary = model.confirm_send.clone().unwrap();
+    assert_eq!(summary.from.as_deref(), Some(demo::WORK_ADDRESS));
+    model.apply(Action::ConfirmSend).unwrap();
+    let [Effect::SendDraft { from, .. }] = model.effects.as_slice() else {
+        panic!("expected one send, got {:?}", model.effects);
+    };
+    assert_eq!(from, demo::WORK_ADDRESS);
+}
+
+#[test]
+fn changing_from_moves_a_saved_draft_to_the_new_account() {
+    let (mut model, _folder) = two_accounts();
+    compose_to(&mut model, "maya@fastmail.test");
+    model.apply(Action::SaveDraft).unwrap();
+    // Not while a save is on its way.
+    model
+        .apply(Action::SetFrom(demo::WORK_ADDRESS.into()))
+        .unwrap();
+    assert_eq!(model.compose.as_ref().unwrap().from, demo::ADDRESS);
+    assert_eq!(model.notice(), Some("Wait for the draft to finish saving."));
+    model.apply(Action::DraftSaved("draft-1".into())).unwrap();
+    model.effects.clear();
+
+    model
+        .apply(Action::SetFrom(demo::WORK_ADDRESS.into()))
+        .unwrap();
+    assert_eq!(
+        model.effects,
+        [Effect::DiscardDraft {
+            from: demo::ADDRESS.into(),
+            draft_id: "draft-1".into()
+        }]
+    );
+    let compose = model.compose.as_ref().unwrap();
+    assert_eq!(compose.draft_id, None);
+    assert!(compose.is_dirty(), "unsaved until saved in the new account");
+    model.effects.clear();
+
+    model.apply(Action::SaveDraft).unwrap();
+    let [
+        Effect::SaveDraft {
+            from,
+            draft_id: None,
+            ..
+        },
+    ] = model.effects.as_slice()
+    else {
+        panic!("expected one new save, got {:?}", model.effects);
+    };
+    assert_eq!(from, demo::WORK_ADDRESS);
+}
+
+#[test]
+fn a_reply_stays_with_its_conversations_account() {
+    let (mut model, _folder) = two_accounts();
+    model.apply(Action::Reply).unwrap();
+    let from = model.compose.as_ref().unwrap().from.clone();
+    let other = if from == demo::ADDRESS {
+        demo::WORK_ADDRESS
+    } else {
+        demo::ADDRESS
+    };
+    model.apply(Action::SetFrom(other.into())).unwrap();
+    assert_eq!(model.compose.as_ref().unwrap().from, from);
+    assert!(model.effects.is_empty());
 }
 
 #[test]

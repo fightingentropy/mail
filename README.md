@@ -106,8 +106,10 @@ to sign in to another Gmail account in your browser. With more than one,
 the sidebar says **All**: the inbox and the other mailboxes show every
 account's mail, newest first, and labels are listed under each address.
 The same menu narrows the window to one account. Triage, replies and
-attachments always go through the account a conversation belongs to, and a
-new message comes from the account shown (the first one when all are).
+attachments always go through the account a conversation belongs to. A new
+message starts from the account shown (the first one when all are); click
+its **From** line to send it from another, and the confirmation before
+sending says which.
 
 The sidebar shows your first name, taken from the mail you send, and each
 account's Google profile photo. Accounts signed in

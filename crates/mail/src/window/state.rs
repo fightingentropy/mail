@@ -64,6 +64,8 @@ pub enum Action {
     Reply,
     ReplyAll,
     NewMessage,
+    /// Write the new message from another of your accounts.
+    SetFrom(String),
     SaveDraft,
     DiscardDraft,
     CloseCompose,
@@ -156,6 +158,8 @@ pub enum Effect {
 /// Who and what a send goes to, as the confirmation shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SendSummary {
+    /// The account it goes from, when you have more than one.
+    pub from: Option<String>,
     pub to: String,
     pub cc: String,
     pub subject: String,
@@ -549,6 +553,7 @@ impl Model {
                     self.compose = Some(Compose::new_message(&from.email));
                 }
             }
+            Action::SetFrom(address) => self.set_from(&address),
             Action::SaveDraft => {
                 if let Some(compose) = &mut self.compose
                     && let Some(draft) = compose.begin_save()
@@ -788,6 +793,30 @@ impl Model {
         Ok(None)
     }
 
+    /// Writes the new message from another account. A copy already in the
+    /// old account's Drafts is discarded there; the next save puts it in the
+    /// new account's.
+    fn set_from(&mut self, address: &str) {
+        let known = self.accounts.iter().any(|account| account.email == address);
+        let Some(compose) = &mut self.compose else {
+            return;
+        };
+        if !known || compose.from == address || !compose.is_new_message() {
+            return;
+        }
+        if compose.is_saving() || compose.is_sending() {
+            self.notify("Wait for the draft to finish saving.".into());
+            return;
+        }
+        let old = compose.from.clone();
+        if let Some(draft_id) = compose.change_from(address) {
+            self.effects.push(Effect::DiscardDraft {
+                from: old,
+                draft_id,
+            });
+        }
+    }
+
     /// Checks the draft can go, then asks for confirmation. Nothing is sent
     /// until `ConfirmSend`.
     fn request_send(&mut self) {
@@ -811,7 +840,9 @@ impl Model {
             self.notify(format!("Not an email address: {}", invalid.join(", ")));
             return;
         }
+        let from = (self.accounts.len() > 1).then(|| compose.from.clone());
         self.confirm_send = Some(SendSummary {
+            from,
             to: draft.to,
             cc: draft.cc,
             subject: draft.subject,

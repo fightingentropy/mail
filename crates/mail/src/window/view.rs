@@ -154,12 +154,20 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
         .show(ui, |ui| thread_list(ui, model, screen, &mut actions));
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(palette.background))
-        .show(ui, |ui| match &mut model.compose {
-            Some(compose) => {
-                let several = model.accounts.len() > 1;
-                compose::draw(ui, compose, &screen.keys.keymap, several)
+        .show(ui, |ui| {
+            let from = if model.compose.is_some() {
+                from_accounts(ui.ctx(), model, screen)
+            } else {
+                Vec::new()
+            };
+            match &mut model.compose {
+                Some(compose) => {
+                    if let Some(address) = compose::draw(ui, compose, &screen.keys.keymap, &from) {
+                        actions.push(Action::SetFrom(address));
+                    }
+                }
+                None => reader(ui, model, screen, &mut actions),
             }
-            None => reader(ui, model, screen, &mut actions),
         });
 
     if model.picker.is_some() {
@@ -592,6 +600,26 @@ struct Face<'a> {
     name: &'a str,
 }
 
+/// Your accounts with their names and photos, for the compose From line.
+fn from_accounts(
+    ctx: &egui::Context,
+    model: &Model,
+    screen: &mut Screen,
+) -> Vec<compose::FromAccount> {
+    model
+        .accounts
+        .iter()
+        .map(|account| {
+            let face = face(model, account);
+            compose::FromAccount {
+                email: account.email.clone(),
+                name: face.name.to_owned(),
+                photo: screen.photo(ctx, &account.email).cloned(),
+            }
+        })
+        .collect()
+}
+
 fn face<'a>(model: &'a Model, account: &'a Account) -> Face<'a> {
     Face {
         email: &account.email,
@@ -601,19 +629,30 @@ fn face<'a>(model: &'a Model, account: &'a Account) -> Face<'a> {
 
 /// A round profile photo, or the first letter of the name when there is none.
 fn paint_avatar(ui: &egui::Ui, screen: &mut Screen, face: &Face, rect: egui::Rect) {
+    paint_face(ui, screen.photo(ui.ctx(), face.email), face.name, rect);
+}
+
+/// A photo in a circle, or the name's initial when there is none.
+pub(super) fn paint_face(
+    ui: &egui::Ui,
+    photo: Option<&egui::TextureHandle>,
+    name: &str,
+    rect: egui::Rect,
+) {
     let palette = theme::palette(ui.ctx());
     let radius = rect.width() / 2.0;
-    match screen.photo(ui.ctx(), face.email) {
+    match photo {
         Some(texture) => {
             egui::Image::new((texture.id(), rect.size()))
                 .corner_radius(CornerRadius::same(radius.round() as u8))
                 .paint_at(ui, rect);
         }
         None => {
+            // A tint of grey rather than a fixed one, so the circle shows on
+            // hovered and chosen rows too.
             ui.painter()
-                .circle_filled(rect.center(), radius, palette.selected);
-            let initial = face
-                .name
+                .circle_filled(rect.center(), radius, palette.dim.gamma_multiply(0.35));
+            let initial = name
                 .chars()
                 .next()
                 .map(|c| c.to_uppercase().to_string())
@@ -1782,6 +1821,7 @@ fn confirm_send(ctx: &egui::Context, summary: &SendSummary, actions: &mut Vec<Ac
                         summary.subject.as_str()
                     };
                     let rows = [
+                        ("From", summary.from.as_deref().unwrap_or_default()),
                         ("To", summary.to.as_str()),
                         ("Cc", summary.cc.as_str()),
                         ("Subject", subject),

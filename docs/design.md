@@ -117,7 +117,10 @@ same newest-first query per account and merges by date; each thread carries
 its account, so triage, replies, drafts and downloads use the right token.
 Labels are per account (IDs such as `Label_1` repeat across accounts), so in
 "All" they are grouped by address and choosing one narrows the window to that
-account. The command line and the agent still read the first account.
+account. A new message's From line picks any account; a reply's is fixed,
+since the thread lives in one mailbox. Changing it after a save discards
+the draft in the old account's Drafts, and the next save goes to the new
+one. The command line and the agent still read the first account.
 
 ## Data model
 
