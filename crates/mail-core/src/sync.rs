@@ -193,7 +193,7 @@ fn full(
     let known = store.message_ids(account.id)?;
     let (stored, fresh): (Vec<String>, Vec<String>) =
         listed.iter().cloned().partition(|id| known.contains(id));
-    let depth = if fresh.len() > options.headers_first_above {
+    let depth = if api.headers_first() && fresh.len() > options.headers_first_above {
         Depth::Headers
     } else {
         Depth::Full

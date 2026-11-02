@@ -111,7 +111,7 @@ Sources: [OAuth 2.0 refresh token expiration](https://developers.google.com/iden
 Signing in again to an account that is already there renews its token and
 photo. **Several accounts** came after v1: every table was keyed by account
 from the start, so the store only had to stop refusing a second one. The
-window syncs the accounts one after another on its sync thread, one Gmail
+window syncs the accounts one after another on its sync thread, one
 client each, and a failing account doesn't hold up the rest. "All" runs the
 same newest-first query per account and merges by date; each thread carries
 its account, so triage, replies, drafts and downloads use the right token.
@@ -121,6 +121,52 @@ account. A new message's From line picks any account; a reply's is fixed,
 since the thread lives in one mailbox. Changing it after a save discards
 the draft in the old account's Drafts, and the next save goes to the new
 one. The command line and the agent still read the first account.
+
+### iCloud
+
+Added on 2 November 2026. iCloud Mail has no API like Gmail's, so an
+iCloud account goes through IMAP (`imap.mail.me.com:993`) and SMTP
+(`smtp.mail.me.com:587`, STARTTLS), signed in with an app-specific password
+you make at account.apple.com. The window's form checks it with iCloud
+(Apple asks IMAP for the name part of the address, then the whole address)
+and keeps it in the Keychain where a Gmail account keeps its refresh token,
+as JSON with the user name that worked. The Keychain item is how Mail tells
+the two kinds apart; the store needed no change.
+
+`icloud::IcloudClient` answers the same `GmailApi` calls as the Gmail
+client, so sync, the store, search and the window don't know the difference:
+
+- **Folders are labels.** Inbox is `INBOX`, Sent Messages `SENT`, Drafts
+  `DRAFT`, Deleted Messages `TRASH`, Junk `SPAM`, and a folder you made is
+  `Folder_<its IMAP name>`. Archive has no label, as archived Gmail has
+  none. Archiving moves a message from Inbox to Archive, adding a label
+  copies it into that folder, and removing one deletes that copy when
+  another remains. Read and starred are the `\Seen` and `\Flagged` flags.
+  Mail only in Sent or Drafts stays there.
+- **IDs come from Message-IDs.** A message's ID is a hash of its
+  Message-ID, so filing it elsewhere doesn't make it new mail, and copies in
+  two folders, such as mail you send yourself, are one message with both
+  labels. Its thread is the first Message-ID in References, else
+  In-Reply-To, so a thread's first message has the thread's ID, as in Gmail.
+- **No history.** Without Gmail's History API every sync is a full one:
+  each folder is listed since 90 days ago (`UID SEARCH SINCE`, then flags
+  and four header lines per message) and only messages Mail hasn't seen are
+  downloaded. There is no quota, so a first sync is bound by bandwidth
+  and takes whole messages at once rather than headers first.
+  Bodies arrive whole, attachments included; an attachment's ID names its
+  copy and MIME part, and opening it reads the message again.
+- **Drafts and sending.** A draft is appended to Drafts with a Message-ID
+  of its own, which is also its draft ID; each save replaces it. Sending
+  reads the draft back, sends it over SMTP without its Bcc line, files a
+  copy in Sent (iCloud doesn't for a client that sends) and removes the
+  draft. Nothing after the message has gone can fail the send, so it can't
+  go twice.
+- **Trash.** Trashing moves every copy to Deleted Messages. IMAP doesn't
+  remember where a message was, so undo puts your own mail back in Sent and
+  the rest in Inbox.
+
+Up to three IMAP connections are kept open while the window runs, one per
+download thread; one quiet for a minute is checked with NOOP before use.
 
 ## Data model
 
@@ -410,6 +456,9 @@ from 285 s to 95 s (451 label checks, nothing downloaded again).
 
 - Google could restrict unverified personal-use apps. Fallback: IMAP with an
   app password, behind the same store.
+- An iCloud sync lists every folder each time. Fine for 90 days of mail;
+  a folder with many thousands of messages would want CONDSTORE to read
+  only what changed.
 - More than a week offline means a full pass: labels for every stored
   message plus anything new, about a minute and a half for my mailbox.
 - A full sync is bounded by Gmail's quota at about 100 full messages a

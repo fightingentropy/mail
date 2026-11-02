@@ -27,6 +27,13 @@ encoding_rs = "0.8"
 directories = "6"
 # Stores the OAuth refresh token in the login Keychain.
 security-framework = "3"
+# iCloud Mail: IMAP to read and file mail, over the same TLS and root
+# certificates ureq uses. Messages arrive as MIME, which mailparse reads.
+imap = { version = "3.0.0-alpha.15", default-features = false }
+imap-proto = "0.16"
+mailparse = "0.18"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 
 [dev-dependencies]
 tempfile = "3"

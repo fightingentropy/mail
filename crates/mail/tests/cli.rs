@@ -223,7 +223,7 @@ fn create_draft_checks_its_arguments_before_any_network() {
     assert!(!ok);
     assert_eq!(error["error"]["code"], "draft_failed");
 
-    // A valid reply gets as far as Gmail sign-in, which this test profile lacks.
+    // A valid reply gets as far as signing in, which this test profile lacks.
     let (ok, error) = agent(
         &folder,
         "create_draft",
@@ -235,6 +235,6 @@ fn create_draft_checks_its_arguments_before_any_network() {
         error["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("No OAuth client")
+            .contains("not signed in to me@example.com")
     );
 }

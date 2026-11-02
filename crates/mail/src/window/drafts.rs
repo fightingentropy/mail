@@ -6,7 +6,7 @@ use std::{sync::mpsc::Sender, thread};
 
 use mail_core::{
     compose::{self, Draft},
-    gmail::{GmailApi, Outcome},
+    gmail::Outcome,
     paths::Paths,
 };
 
@@ -32,7 +32,7 @@ pub fn save(
     let from = from.to_owned();
     thread::spawn(move || {
         let result = accounts::client(&paths, &from)
-            .and_then(|gmail| compose::save(&gmail, &from, &draft, existing.as_deref()));
+            .and_then(|gmail| compose::save(&*gmail, &from, &draft, existing.as_deref()));
         let _ = done.send(match result {
             Ok(id) => Finished::Saved(id),
             Err(error) => Finished::Failed(format!("Could not save the draft: {error:#}")),
@@ -56,7 +56,7 @@ pub fn discard(
         let _ = done.send(match result {
             Ok(Outcome::Done | Outcome::Gone) => Finished::Discarded,
             Ok(Outcome::Rejected(message)) => {
-                Finished::Failed(format!("Gmail kept the draft: {message}"))
+                Finished::Failed(format!("The draft was kept: {message}"))
             }
             Err(error) => Finished::Failed(format!("Could not discard the draft: {error:#}")),
         });
@@ -78,7 +78,7 @@ pub fn send(
     let from = from.to_owned();
     thread::spawn(move || {
         let result = accounts::client(&paths, &from).and_then(|gmail| {
-            compose::send(&gmail, &from, &draft, existing.as_deref(), |draft_id| {
+            compose::send(&*gmail, &from, &draft, existing.as_deref(), |draft_id| {
                 let _ = done.send(Finished::Saved(draft_id.to_owned()));
             })
         });

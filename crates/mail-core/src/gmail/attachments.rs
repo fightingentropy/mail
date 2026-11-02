@@ -19,7 +19,7 @@ use crate::model::Attachment;
 /// fresh ID. Network and quota errors are returned as they are: a new ID
 /// would not help.
 pub fn fetch(
-    gmail: &impl GmailApi,
+    gmail: &(impl GmailApi + ?Sized),
     message_id: &str,
     attachment: &Attachment,
 ) -> anyhow::Result<Vec<u8>> {
@@ -30,16 +30,16 @@ pub fn fetch(
     }
     let message = gmail
         .message(message_id)?
-        .context("The message is no longer in Gmail")?;
+        .context("The message is no longer in your mailbox")?;
     let fresh = parse_message(message)
         .attachments
         .into_iter()
         .find(|candidate| candidate.part_id == attachment.part_id)
         .and_then(|candidate| candidate.gmail_attachment_id)
-        .context("Gmail no longer has this attachment")?;
+        .context("This attachment is no longer in your mailbox")?;
     gmail
         .attachment(message_id, &fresh)?
-        .context("Gmail no longer has this attachment")
+        .context("This attachment is no longer in your mailbox")
 }
 
 /// Writes `bytes` into `folder` under the attachment's name, made safe for

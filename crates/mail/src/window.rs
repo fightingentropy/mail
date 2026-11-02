@@ -9,6 +9,7 @@ mod demo;
 mod downloads;
 mod drafts;
 mod files;
+mod icloud_form;
 mod keys;
 mod links;
 mod original;
@@ -107,6 +108,7 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
             });
             let (drafts_done, drafts) = mpsc::channel();
             let (sign_ins_done, sign_ins) = mpsc::channel();
+            let (icloud_sign_ins_done, icloud_sign_ins) = mpsc::channel();
             let (photos_done, photos) = mpsc::channel();
             let status = if demo {
                 SyncStatus::Demo
@@ -126,6 +128,8 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
                 drafts_done,
                 sign_ins,
                 sign_ins_done,
+                icloud_sign_ins,
+                icloud_sign_ins_done,
                 photos,
                 photos_done,
                 downloader,
@@ -157,6 +161,9 @@ struct Shell {
     /// Results of "Add account…": the new account's address, or the error.
     sign_ins: Receiver<Result<String, String>>,
     sign_ins_done: Sender<Result<String, String>>,
+    /// Results of "Add iCloud account…", which its form shows.
+    icloud_sign_ins: Receiver<Result<String, String>>,
+    icloud_sign_ins_done: Sender<Result<String, String>>,
     /// Results of "Choose photo…": the account's address once its photo is
     /// saved, `None` if you cancelled, or the error.
     photos: Receiver<Result<Option<String>, String>>,
@@ -313,7 +320,7 @@ impl Shell {
                     };
                     if report.rejected > 0 {
                         self.model.notify(format!(
-                            "Gmail refused {} change{}; showing Gmail's version.",
+                            "{} change{} couldn't be made; showing your mailbox as it is.",
                             report.rejected,
                             if report.rejected == 1 { "" } else { "s" }
                         ));
@@ -340,9 +347,24 @@ impl Shell {
         }
     }
 
-    /// Picks up accounts signed in from the window, and syncs them.
+    /// Picks up accounts signed in from the window, and syncs them. A failed
+    /// iCloud sign-in shows in its form, if that is still open.
     fn receive_sign_ins(&mut self) {
-        let results: Vec<Result<String, String>> = self.sign_ins.try_iter().collect();
+        let mut results: Vec<Result<String, String>> = self.sign_ins.try_iter().collect();
+        for result in self.icloud_sign_ins.try_iter().collect::<Vec<_>>() {
+            match (result, &mut self.screen.icloud_form) {
+                (Err(error), Some(form)) => {
+                    form.waiting = false;
+                    form.error = Some(error);
+                }
+                (result, form) => {
+                    if result.is_ok() && form.is_some() {
+                        self.screen.icloud_form = None;
+                    }
+                    results.push(result);
+                }
+            }
+        }
         for result in results {
             match result {
                 Ok(email) => {
@@ -454,6 +476,10 @@ impl Shell {
                     None
                 }
                 Effect::AddAccount => self.add_account(ctx),
+                Effect::AddIcloudAccount { address, password } => {
+                    self.add_icloud_account(ctx, address, password);
+                    None
+                }
                 Effect::ChoosePhoto(email) => {
                     self.choose_photo(ctx, email);
                     None
@@ -586,6 +612,24 @@ impl Shell {
             wake.request_repaint();
         });
         Some("Finish signing in in your browser.".into())
+    }
+
+    /// Checks the app-specific password with iCloud on a thread of its own;
+    /// the form waits for the answer.
+    fn add_icloud_account(&mut self, ctx: &egui::Context, address: String, password: String) {
+        let done = self.icloud_sign_ins_done.clone();
+        if self.demo {
+            let _ = done.send(Err("Adding accounts isn't available in the demo.".into()));
+            return;
+        }
+        let paths = self.paths.clone();
+        let wake = ctx.clone();
+        thread::spawn(move || {
+            let result = accounts::sign_in_icloud(&paths, &address, &password)
+                .map_err(|error| format!("{error:#}"));
+            let _ = done.send(result);
+            wake.request_repaint();
+        });
     }
 
     fn apply(&mut self, action: Action) {

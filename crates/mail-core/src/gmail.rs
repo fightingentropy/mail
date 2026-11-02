@@ -1,7 +1,8 @@
 //! The Gmail REST API: the calls Mail makes and the JSON they return.
 //!
 //! Sync talks to [`GmailApi`] rather than to HTTP directly, so tests run the
-//! real sync logic against an in-memory mailbox. Sending is one call,
+//! real sync logic against an in-memory mailbox, and iCloud answers the
+//! same calls over IMAP ([`crate::icloud`]). Sending is one call,
 //! `send_draft`, used only by the window after you confirm.
 
 pub mod attachments;
@@ -17,6 +18,7 @@ pub use client::{GmailClient, http_agent};
 pub(crate) use message::decode_words;
 pub(crate) use message::split_address;
 pub use message::{ApiMessage, parse_message};
+pub(crate) use message::{BASE64URL, Body, Header, Part};
 pub(crate) use {html::to_text as html_text, message::body};
 
 pub trait GmailApi: Sync {
@@ -67,6 +69,16 @@ pub trait GmailApi: Sync {
     /// Sends a saved draft and returns the sent message's ID. Only the window
     /// calls this, after you confirm; agents and the command line can't.
     fn send_draft(&self, draft_id: &str) -> anyhow::Result<String>;
+    /// Whether a big first sync should store headers first. Under Gmail's
+    /// quota that makes the mailbox usable sooner; IMAP has no quota, so
+    /// iCloud downloads whole messages straight away.
+    fn headers_first(&self) -> bool {
+        true
+    }
+    /// The account's profile photo as image bytes, if the provider has one.
+    fn profile_photo(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
 }
 
 /// How Gmail answered a change. Transient failures are errors instead, so

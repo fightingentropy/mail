@@ -12,7 +12,6 @@ use std::{
 
 use anyhow::bail;
 use mail_core::{
-    gmail::GmailClient,
     model::Account,
     paths::Paths,
     store::Store,
@@ -64,7 +63,7 @@ impl Syncer {
 /// The database and a Gmail client per account, kept between syncs.
 struct Connection {
     store: Store,
-    clients: HashMap<String, GmailClient>,
+    clients: HashMap<String, accounts::Client>,
 }
 
 fn run(paths: Paths, requests: Receiver<Request>, events: Sender<Event>, wake: impl Fn()) {
@@ -151,7 +150,7 @@ fn sync_all(
         if is_stale(&photo)
             && photos_tried.insert(account.email.clone())
             && let Some(gmail) = clients.get(&account.email)
-            && accounts::save_photo(paths, gmail, &account.email).unwrap_or(false)
+            && accounts::save_photo(paths, &**gmail, &account.email).unwrap_or(false)
         {
             let _ = events.send(Event::Photo(account.email.clone()));
         }
@@ -162,7 +161,7 @@ fn sync_all(
 fn sync_account(
     paths: &Paths,
     store: &mut Store,
-    clients: &mut HashMap<String, GmailClient>,
+    clients: &mut HashMap<String, accounts::Client>,
     account: &Account,
     events: &Sender<Event>,
     wake: &impl Fn(),
@@ -173,7 +172,7 @@ fn sync_account(
     };
     sync::sync(
         store,
-        gmail,
+        &**gmail,
         account,
         &SyncOptions::default(),
         &mut |progress| {

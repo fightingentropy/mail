@@ -120,5 +120,8 @@ fn fetches_only_the_pictures_asked_for() {
 fn a_message_deleted_in_gmail_says_so() {
     let gmail = FakeGmail::new(Vec::new());
     let error = fetch(&gmail, "m1", &["logo".into()]).unwrap_err();
-    assert_eq!(error.to_string(), "The message is no longer in Gmail");
+    assert_eq!(
+        error.to_string(),
+        "The message is no longer in your mailbox"
+    );
 }

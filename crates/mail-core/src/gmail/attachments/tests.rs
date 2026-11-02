@@ -81,7 +81,10 @@ fn a_message_deleted_in_gmail_says_so() {
     let (gmail, mut stored) = mailbox();
     stored.gmail_attachment_id = None;
     let error = fetch(&gmail, "gone", &stored).unwrap_err();
-    assert_eq!(error.to_string(), "The message is no longer in Gmail");
+    assert_eq!(
+        error.to_string(),
+        "The message is no longer in your mailbox"
+    );
 }
 
 #[test]

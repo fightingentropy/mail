@@ -106,7 +106,7 @@ impl Part {
 }
 
 /// Gmail's base64url sometimes has padding and sometimes doesn't.
-pub(super) const BASE64URL: GeneralPurpose = GeneralPurpose::new(
+pub(crate) const BASE64URL: GeneralPurpose = GeneralPurpose::new(
     &alphabet::URL_SAFE,
     GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
 );
@@ -137,6 +137,13 @@ pub fn parse_message(api: ApiMessage) -> Message {
         })
         .collect();
 
+    // Gmail sends a snippet; IMAP mail gets one from its text.
+    let snippet = if api.snippet.is_empty() {
+        snippet_of(&body_text)
+    } else {
+        html::tidy(&html::decode_entities(&api.snippet))
+    };
+
     Message {
         gmail_id: api.id,
         thread_id: api.thread_id,
@@ -146,7 +153,7 @@ pub fn parse_message(api: ApiMessage) -> Message {
         from_addr,
         to: header("To").unwrap_or_default(),
         cc: header("Cc").unwrap_or_default(),
-        snippet: html::tidy(&html::decode_entities(&api.snippet)),
+        snippet,
         body_text,
         body_links,
         has_html: found.html.is_some(),
@@ -159,6 +166,25 @@ pub fn parse_message(api: ApiMessage) -> Message {
         label_ids: api.label_ids,
         attachments,
     }
+}
+
+/// The start of a message's text on one line, about as long as Gmail's.
+fn snippet_of(text: &str) -> String {
+    const LENGTH: usize = 200;
+    let mut snippet = String::new();
+    for word in text.split_whitespace() {
+        if snippet.chars().count() + word.chars().count() > LENGTH {
+            if snippet.is_empty() {
+                snippet.extend(word.chars().take(LENGTH));
+            }
+            break;
+        }
+        if !snippet.is_empty() {
+            snippet.push(' ');
+        }
+        snippet.push_str(word);
+    }
+    snippet
 }
 
 #[derive(Default)]

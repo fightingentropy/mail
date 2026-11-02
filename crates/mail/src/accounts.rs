@@ -1,5 +1,5 @@
-//! Signing accounts in, connecting to them, and keeping their profile
-//! photos. The command line and the window share these.
+//! Signing accounts in, Gmail or iCloud, connecting to them, and keeping
+//! their profile photos. The command line and the window share these.
 
 use std::{fs, io::Cursor, path::Path, process::Command};
 
@@ -8,9 +8,13 @@ use image::{DynamicImage, ImageDecoder, ImageReader, imageops::FilterType};
 use mail_core::{
     auth::{self, OAuthClient, keychain},
     gmail::{self, GmailApi, GmailClient},
+    icloud::{IcloudClient, Login},
     paths::Paths,
     store::Store,
 };
+
+/// A Gmail or iCloud account, through the calls both answer.
+pub type Client = Box<dyn GmailApi + Send>;
 
 /// Runs Google sign-in in the browser and remembers the account: in the
 /// database, its refresh token in the Keychain, and its photo. Signing in to
@@ -31,18 +35,34 @@ pub fn sign_in(
     Ok(email)
 }
 
-/// A Gmail client for one signed-in account.
-pub fn client(paths: &Paths, email: &str) -> anyhow::Result<GmailClient> {
-    Ok(GmailClient::new(
-        OAuthClient::load(&paths.oauth_client())?,
-        keychain::load(email)?,
-        None,
-    ))
+/// Checks an iCloud address and app-specific password with iCloud and
+/// remembers the account, its login in the Keychain. Returns the address.
+pub fn sign_in_icloud(paths: &Paths, address: &str, password: &str) -> anyhow::Result<String> {
+    let (_, login) = IcloudClient::sign_in(address, password)?;
+    let address = address.trim();
+    Store::open(&paths.database())?.add_account(address)?;
+    keychain::save(address, &login.to_secret())?;
+    Ok(address.to_owned())
 }
 
-/// Fetches and saves an account's profile photo. Returns false when Google
-/// gives none, as for a sign-in from before Mail asked to see it.
-pub fn save_photo(paths: &Paths, gmail: &GmailClient, email: &str) -> anyhow::Result<bool> {
+/// A client for one signed-in account. The Keychain says which kind: an
+/// iCloud login, or a Google refresh token.
+pub fn client(paths: &Paths, email: &str) -> anyhow::Result<Client> {
+    let secret = keychain::load(email)?;
+    if let Some(login) = Login::from_secret(&secret) {
+        return Ok(Box::new(IcloudClient::new(email, login)));
+    }
+    Ok(Box::new(GmailClient::new(
+        OAuthClient::load(&paths.oauth_client())?,
+        secret,
+        None,
+    )))
+}
+
+/// Fetches and saves an account's profile photo. Returns false when there
+/// is none: iCloud has none to give, and Google none for a sign-in from
+/// before Mail asked to see it.
+pub fn save_photo(paths: &Paths, gmail: &dyn GmailApi, email: &str) -> anyhow::Result<bool> {
     let Some(bytes) = gmail.profile_photo()? else {
         return Ok(false);
     };

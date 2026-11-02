@@ -101,8 +101,14 @@ Right-click a conversation for the same actions, with their shortcuts.
 
 ### Several accounts
 
-Click the account under "Mail" in the sidebar and choose **Add account…**
-to sign in to another Gmail account in your browser. With more than one,
+Click the account under "Mail" in the sidebar and choose **Add Gmail
+account…** to sign in to another Gmail account in your browser, or **Add
+iCloud account…** for iCloud Mail: enter your address and an app-specific
+password, which you make at [account.apple.com](https://account.apple.com)
+under Sign-In and Security. Mail never sees your Apple Account password.
+iCloud's folders show as labels: Inbox, Sent and Drafts as in Gmail,
+Archive as archived mail, and your own folders under the address. With more
+than one,
 the sidebar says **All**: the inbox and the other mailboxes show every
 account's mail, newest first, and labels are listed under each address.
 The same menu narrows the window to one account. Triage, replies and
@@ -180,6 +186,10 @@ mail (CLI, agent CLI, window)  →  mail-core: auth · gmail · sync · store
   account's refresh token in the macOS Keychain. Mail never sees your
   password. Besides Gmail it asks only for your name and profile photo, for
   the account menu.
+- **iCloud over IMAP and SMTP.** iCloud Mail has no such API, so Mail
+  reads and files it over IMAP and sends over SMTP, with an app-specific
+  password kept in the Keychain. It answers the same calls as the Gmail
+  client, so sync, search and the window treat both alike.
 - **Sync.** The first run downloads the last 90 days, paced to Gmail's quota
   (about 100 full messages a minute). Past 300 messages it stores headers
   first, three times faster, so the mailbox is usable sooner, then fills in
@@ -193,8 +203,8 @@ mail (CLI, agent CLI, window)  →  mail-core: auth · gmail · sync · store
   millisecond or two ([numbers](docs/design.md#performance)).
 - **Writing.** Replies are built locally as RFC 5322 messages, threaded with
   `In-Reply-To` and `References`, and saved through Gmail's drafts API. The
-  window sends a saved draft (`drafts.send`) only after you confirm; the
-  agent CLI and `mail draft` can't send.
+  window sends a saved draft (`drafts.send`, or SMTP for iCloud) only after you
+  confirm; the agent CLI and `mail draft` can't send.
 - **Window.** egui/eframe with an embedded Inter font. The drawing code reads
   a model that has no egui in it, so tests drive the window like a person at
   the keyboard.
@@ -240,6 +250,9 @@ Built on [SQLite](https://sqlite.org) via
 [rusqlite](https://github.com/rusqlite/rusqlite),
 [egui and eframe](https://github.com/emilk/egui),
 [ureq](https://github.com/algesten/ureq),
+[rust-imap](https://github.com/jonhoo/rust-imap),
+[mailparse](https://github.com/staktrace/mailparse),
+[rustls](https://github.com/rustls/rustls),
 [serde](https://serde.rs), [clap](https://github.com/clap-rs/clap),
 [jiff](https://github.com/BurntSushi/jiff),
 [encoding_rs](https://github.com/hsivonen/encoding_rs) and

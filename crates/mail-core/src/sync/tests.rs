@@ -39,6 +39,8 @@ struct State {
     /// Label-only reads, as opposed to full downloads in `fetches`.
     label_fetches: usize,
     header_fetches: usize,
+    /// Like iCloud: no quota, so a big first sync needn't store headers first.
+    no_quota: bool,
 }
 
 impl FakeGmail {
@@ -57,6 +59,7 @@ impl FakeGmail {
                 drafts_created: 0,
                 label_fetches: 0,
                 header_fetches: 0,
+                no_quota: false,
             }),
         }
     }
@@ -141,6 +144,10 @@ impl FakeGmail {
         self.state.lock().unwrap().calls.clone()
     }
 
+    fn set_no_quota(&self) {
+        self.state.lock().unwrap().no_quota = true;
+    }
+
     pub(crate) fn set_offline(&self, offline: bool) {
         self.state.lock().unwrap().offline = offline;
     }
@@ -200,6 +207,10 @@ fn entry(message: &ApiMessage) -> HistoryMessage {
 }
 
 impl GmailApi for FakeGmail {
+    fn headers_first(&self) -> bool {
+        !self.state.lock().unwrap().no_quota
+    }
+
     fn profile(&self) -> anyhow::Result<Profile> {
         Ok(Profile {
             email_address: "me@example.com".into(),
@@ -795,6 +806,19 @@ fn a_big_first_sync_stores_headers_first_then_fills_bodies_newest_first() {
     assert_eq!((report.bodies_filled, report.bodies_pending), (2, 0));
     assert_eq!(search(&store, "stories"), ["d"]);
     assert_eq!(labels(&store, "e"), ["Label_1"]);
+}
+
+#[test]
+fn without_a_quota_a_big_first_sync_downloads_whole_messages() {
+    let gmail = mailbox();
+    gmail.set_no_quota();
+    let mut store = Store::in_memory();
+    let account = store.add_account("me@example.com").unwrap();
+    let report = sync(&mut store, &gmail, &account, &headers_first(), &mut |_| {}).unwrap();
+    assert_eq!((gmail.header_fetches(), gmail.fetches()), (0, 5));
+    assert_eq!((report.downloaded, report.bodies_pending), (5, 0));
+    // Bodies are searchable straight away.
+    assert_eq!(search(&store, "stories"), ["d"]);
 }
 
 #[test]

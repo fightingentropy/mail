@@ -15,6 +15,7 @@ use mail_core::{
 
 use super::{
     compose,
+    icloud_form::{self, IcloudForm},
     keys::{Bindable, Command, Focus, Keymap, Keys, Press},
     links,
     shortcuts::{self, Settings},
@@ -42,6 +43,8 @@ pub struct Screen {
     /// Where Settings saves changed shortcuts.
     shortcuts_path: PathBuf,
     settings: Option<Settings>,
+    /// "Add iCloud account…" while it is open.
+    pub icloud_form: Option<IcloudForm>,
     paths: Paths,
     /// Profile photos by address, loaded once; `None` when there is none.
     photos: HashMap<String, Option<egui::TextureHandle>>,
@@ -70,6 +73,7 @@ impl Screen {
             keys: Keys::new(Keymap::load(&shortcuts_path)),
             shortcuts_path,
             settings: None,
+            icloud_form: None,
             paths,
             photos: HashMap::new(),
             search_text: String::new(),
@@ -185,6 +189,11 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
     if let Some(summary) = &model.confirm_send {
         confirm_send(ui.ctx(), summary, &mut actions);
     }
+    if let Some(form) = &mut screen.icloud_form
+        && !icloud_form::draw(ui.ctx(), form, &mut actions)
+    {
+        screen.icloud_form = None;
+    }
 
     for action in actions {
         let clears_search = action == Action::ClearSearch;
@@ -201,6 +210,10 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
 }
 
 fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions: &mut Vec<Action>) {
+    // Its fields take the typing; it closes itself on Esc.
+    if screen.icloud_form.is_some() {
+        return;
+    }
     let focus = if screen.settings.is_some() {
         Focus::Settings
     } else if model.help {
@@ -468,8 +481,12 @@ fn account_menu(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: 
         }
     }
     ui.separator();
-    if menu_row(ui, MenuIcon::Plus, "Add account…") {
+    if menu_row(ui, MenuIcon::Plus, "Add Gmail account…") {
         chosen = Some(Action::AddAccount);
+    }
+    if menu_row(ui, MenuIcon::Plus, "Add iCloud account…") {
+        screen.icloud_form = Some(IcloudForm::default());
+        ui.close();
     }
     if menu_row(ui, MenuIcon::Photo, "Choose photo…") {
         chosen = Some(Action::ChoosePhoto);

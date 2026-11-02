@@ -188,7 +188,7 @@ pub fn save(
         match api.update_draft(id, &raw, thread_id)? {
             Outcome::Done => return Ok(id.to_owned()),
             Outcome::Gone => {}
-            Outcome::Rejected(message) => anyhow::bail!("Gmail refused the draft: {message}"),
+            Outcome::Rejected(message) => anyhow::bail!("The draft was refused: {message}"),
         }
     }
     api.create_draft(&raw, thread_id)

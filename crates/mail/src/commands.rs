@@ -136,7 +136,7 @@ fn sync_account(
         let _ = std::io::stderr().flush();
     };
 
-    let report = sync::sync(store, &gmail, account, &options, &mut show)?;
+    let report = sync::sync(store, &*gmail, account, &options, &mut show)?;
     // A big first sync stores headers first; keep going until every body is
     // here. Each round is short, and Ctrl-C leaves the rest for next time.
     let mut filled = report.bodies_filled;
@@ -148,7 +148,7 @@ fn sync_account(
             .into_iter()
             .find(|stored| stored.id == account.id)
             .context("The account went away during sync")?;
-        let next = sync::sync(store, &gmail, &account, &options, &mut show)?;
+        let next = sync::sync(store, &*gmail, &account, &options, &mut show)?;
         filled += next.bodies_filled;
         pending = next.bodies_pending;
         if next.bodies_filled == 0 {
@@ -456,7 +456,7 @@ pub(crate) fn save_draft(
     draft: &Draft,
 ) -> anyhow::Result<String> {
     let gmail = accounts::client(paths, &account.email)?;
-    compose::save(&gmail, &account.email, draft, None)
+    compose::save(&*gmail, &account.email, draft, None)
 }
 
 pub(crate) fn signed_in(store: &Store) -> anyhow::Result<Account> {

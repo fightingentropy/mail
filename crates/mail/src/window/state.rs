@@ -95,6 +95,11 @@ pub enum Action {
     SetScope(Option<i64>),
     /// Starts Google sign-in for another account.
     AddAccount,
+    /// Signs in to an iCloud account with an app-specific password.
+    AddIcloudAccount {
+        address: String,
+        password: String,
+    },
     /// Asks for an image to use as the photo of the account in the header.
     ChoosePhoto,
     /// Drops the chosen photo, going back to Google's.
@@ -142,6 +147,11 @@ pub enum Effect {
     },
     /// Google sign-in in the browser, for another account.
     AddAccount,
+    /// Check an iCloud app-specific password and add the account.
+    AddIcloudAccount {
+        address: String,
+        password: String,
+    },
     /// Pick an image file for this account's photo.
     ChoosePhoto(String),
     UseGooglePhoto(String),
@@ -672,6 +682,9 @@ impl Model {
                 self.reload()?;
             }
             Action::AddAccount => self.effects.push(Effect::AddAccount),
+            Action::AddIcloudAccount { address, password } => self
+                .effects
+                .push(Effect::AddIcloudAccount { address, password }),
             Action::ToggleOriginal => {
                 if self
                     .open

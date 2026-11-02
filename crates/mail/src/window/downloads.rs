@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::Context;
 use mail_core::{
-    gmail::{GmailClient, attachments, inline},
+    gmail::{attachments, inline},
     model::{Attachment, InlineImage},
     paths::{self, Paths},
 };
@@ -98,7 +98,7 @@ fn run(paths: Paths, jobs: Receiver<Job>, events: Sender<Event>, wake: impl Fn()
     // A Gmail client of its own: the sync thread's may be busy with a long
     // sync. Each paces itself; an attachment costs 20 quota units, a third
     // of a message.
-    let mut clients: HashMap<String, GmailClient> = HashMap::new();
+    let mut clients: HashMap<String, accounts::Client> = HashMap::new();
     for job in jobs {
         let event = match carry_out(&paths, &mut clients, &job) {
             Ok(event) => event,
@@ -128,7 +128,7 @@ fn run(paths: Paths, jobs: Receiver<Job>, events: Sender<Event>, wake: impl Fn()
 
 fn carry_out(
     paths: &Paths,
-    clients: &mut HashMap<String, GmailClient>,
+    clients: &mut HashMap<String, accounts::Client>,
     job: &Job,
 ) -> anyhow::Result<Event> {
     if !clients.contains_key(&job.account) {
@@ -137,7 +137,7 @@ fn carry_out(
     let gmail = &clients[&job.account];
     match &job.work {
         Work::Attachment(attachment) => {
-            let bytes = attachments::fetch(gmail, &job.message_id, attachment)?;
+            let bytes = attachments::fetch(&**gmail, &job.message_id, attachment)?;
             let folder = paths::downloads()?;
             let path = attachments::save(&folder, &attachment.filename, &bytes)
                 .with_context(|| format!("Could not save to {}", folder.display()))?;
@@ -146,7 +146,7 @@ fn carry_out(
         Work::InlineImages { account_id, wanted } => Ok(Event::InlineImages {
             account_id: *account_id,
             message_id: job.message_id.clone(),
-            images: Ok(inline::fetch(gmail, &job.message_id, wanted)?),
+            images: Ok(inline::fetch(&**gmail, &job.message_id, wanted)?),
         }),
     }
 }

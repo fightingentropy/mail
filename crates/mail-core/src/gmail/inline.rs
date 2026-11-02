@@ -56,13 +56,13 @@ pub fn embed<'a>(html: &'a str, images: &[InlineImage]) -> Cow<'a, str> {
 /// its parts, then each picture. A part that isn't a picture is skipped, so
 /// a reference can't put a document in the page.
 pub fn fetch(
-    gmail: &impl GmailApi,
+    gmail: &(impl GmailApi + ?Sized),
     message_id: &str,
     wanted: &[String],
 ) -> anyhow::Result<Vec<InlineImage>> {
     let message = gmail
         .message(message_id)?
-        .context("The message is no longer in Gmail")?;
+        .context("The message is no longer in your mailbox")?;
     let mut parts = Vec::new();
     if let Some(root) = &message.payload {
         collect(root, &mut parts);
