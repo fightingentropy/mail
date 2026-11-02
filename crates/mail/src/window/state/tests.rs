@@ -76,6 +76,7 @@ fn archive_moves_to_the_next_thread_and_undo_brings_it_back() {
     );
     assert_eq!(model.pending_changes(), 2);
     assert_eq!(model.notice(), Some("Undone."));
+    assert!(!model.notice_offers_undo());
 }
 
 #[test]
@@ -156,7 +157,8 @@ fn label_picker_filters_and_toggles() {
             .label_ids
             .contains(&"Label_travel".to_string())
     );
-    assert_eq!(model.notice(), Some("Labeled Travel. Press z to undo."));
+    assert_eq!(model.notice(), Some("Labeled Travel"));
+    assert!(model.notice_offers_undo());
 
     model.apply(Action::OpenPicker).unwrap();
     model
@@ -193,7 +195,8 @@ fn notices_clear_themselves_but_work_in_progress_stays() {
     let (mut model, _folder) = model();
     model.apply(Action::Archive).unwrap();
     let set = Instant::now();
-    assert!(model.notice().unwrap().starts_with("Archived"));
+    assert_eq!(model.notice(), Some("Archived"));
+    assert!(model.notice_offers_undo());
     let wait = model.tick(set).unwrap().expect("waits to clear the notice");
     assert!(wait <= NOTICE_FOR);
 

@@ -98,6 +98,8 @@ action, and Reset puts the defaults back. Changes are saved to
 `shortcuts.json` in Mail's data folder, as the difference from the defaults.
 
 Right-click a conversation for the same actions, with their shortcuts.
+What you just did shows for a few seconds at the bottom right, with
+**Undo** after archiving, deleting or labelling.
 
 ### Several accounts
 

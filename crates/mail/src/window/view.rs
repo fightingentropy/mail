@@ -21,6 +21,7 @@ use super::{
     shortcuts::{self, Settings},
     state::{Action, MAILBOXES, Model, OpenThread, OriginalHtml, SendSummary, View},
     theme::{self, Palette},
+    toast::{self, Toast},
 };
 use crate::{accounts, dates};
 
@@ -45,6 +46,7 @@ pub struct Screen {
     settings: Option<Settings>,
     /// "Add iCloud account…" while it is open.
     pub icloud_form: Option<IcloudForm>,
+    toast: Toast,
     paths: Paths,
     /// Profile photos by address, loaded once; `None` when there is none.
     photos: HashMap<String, Option<egui::TextureHandle>>,
@@ -74,6 +76,7 @@ impl Screen {
             shortcuts_path,
             settings: None,
             icloud_form: None,
+            toast: Toast::default(),
             paths,
             photos: HashMap::new(),
             search_text: String::new(),
@@ -125,13 +128,9 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
     let palette = theme::palette(ui.ctx());
     let mut actions = Vec::new();
     handle_keys(ui.ctx(), model, screen, &mut actions);
-    let undo_key = screen.keys.keymap.hint(Bindable::Undo);
-    if model.undo_key != undo_key {
-        model.undo_key = undo_key;
-    }
 
     egui::Panel::bottom("status")
-        .exact_size(32.0)
+        .exact_size(toast::STATUS_BAR)
         .frame(
             egui::Frame::new()
                 .fill(palette.sidebar)
@@ -194,6 +193,14 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
     {
         screen.icloud_form = None;
     }
+    let undo_key = screen.keys.keymap.hint(Bindable::Undo);
+    screen.toast.draw(
+        ui.ctx(),
+        model.notice(),
+        model.notice_offers_undo(),
+        &undo_key,
+        &mut actions,
+    );
 
     for action in actions {
         let clears_search = action == Action::ClearSearch;
@@ -1220,7 +1227,16 @@ fn original_reader(
     }
 
     let top = ui.min_rect().bottom();
-    let page = egui::Rect::from_min_max(Pos2::new(column.left(), top), column.max);
+    // WebKit would cover a toast, so the page ends above one.
+    let bottom = if screen.toast.is_showing(model.notice()) {
+        column.bottom() - toast::ROOM
+    } else {
+        column.bottom()
+    };
+    let page = egui::Rect::from_min_max(
+        Pos2::new(column.left(), top),
+        Pos2::new(column.right(), bottom.max(top)),
+    );
     // White paper under WebKit, so nothing flashes while it loads.
     ui.painter()
         .rect_filled(page, CornerRadius::ZERO, Color32::WHITE);
@@ -1709,14 +1725,6 @@ fn status_bar(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &m
             egui::Label::new(RichText::new(text).font(theme::regular(13.0)).color(color))
                 .truncate(),
         );
-        if let Some(notice) = model.notice() {
-            ui.add_space(24.0);
-            ui.label(
-                RichText::new(notice)
-                    .font(theme::regular(13.0))
-                    .color(palette.text),
-            );
-        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let keymap = &screen.keys.keymap;
             if status_link(ui, &keymap.hint(Bindable::Shortcuts), "Shortcuts") {

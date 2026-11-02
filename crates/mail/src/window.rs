@@ -17,6 +17,7 @@ mod script;
 mod shortcuts;
 mod state;
 mod theme;
+mod toast;
 mod view;
 
 use std::{

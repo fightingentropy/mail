@@ -18,7 +18,7 @@ use super::compose::Compose;
 
 /// How long a selected unread thread stays on screen before it counts as read.
 pub const READ_AFTER: Duration = Duration::from_millis(1500);
-/// How long a status-bar notice stays before it clears itself.
+/// How long a notice stays before it clears itself.
 pub const NOTICE_FOR: Duration = Duration::from_secs(5);
 
 /// The mailboxes in the sidebar, in order, before the user's labels.
@@ -165,6 +165,14 @@ pub enum Effect {
     },
 }
 
+/// A line about what just happened, and when it was set.
+struct Notice {
+    text: String,
+    since: Instant,
+    /// Triage, which the toast offers to undo.
+    undoable: bool,
+}
+
 /// Who and what a send goes to, as the confirmation shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SendSummary {
@@ -238,11 +246,8 @@ pub struct Model {
     pub open: Option<OpenThread>,
     pub picker: Option<Picker>,
     pub help: bool,
-    /// One line for the status bar, such as "Archived. Press z to undo.",
-    /// and when it was set. See [`Model::notify`].
-    notice: Option<(String, Instant)>,
-    /// The Undo shortcut for that line; the window keeps it current.
-    pub undo_key: String,
+    /// What just happened, shown as a toast. See [`Model::notify`].
+    notice: Option<Notice>,
     /// Set after a change, so the window can ask sync to send it.
     pub wants_sync: bool,
     /// The reply or new message being written, shown instead of the reader.
@@ -277,7 +282,6 @@ impl Model {
             picker: None,
             help: false,
             notice: None,
-            undo_key: "z".into(),
             wants_sync: false,
             compose: None,
             confirm_send: None,
@@ -755,16 +759,26 @@ impl Model {
 
     /// Marks the selected thread read once it has been on screen for
     /// [`READ_AFTER`]. Returns how long to wait before checking again.
-    /// The status bar's notice, if one is showing.
+    /// The toast's line, if one is showing.
     pub fn notice(&self) -> Option<&str> {
-        self.notice.as_ref().map(|(text, _)| text.as_str())
+        self.notice.as_ref().map(|notice| notice.text.as_str())
     }
 
-    /// Shows a notice in the status bar. It clears itself after
-    /// [`NOTICE_FOR`], unless it reports work still going ("Sending…"),
-    /// which stays until the result replaces it.
+    /// Whether the toast reports triage that can still be undone, and so
+    /// offers Undo.
+    pub fn notice_offers_undo(&self) -> bool {
+        self.notice.as_ref().is_some_and(|notice| notice.undoable) && self.undo.is_some()
+    }
+
+    /// Shows a notice as a toast. It clears itself after [`NOTICE_FOR`],
+    /// unless it reports work still going ("Sending…"), which stays until
+    /// the result replaces it.
     pub fn notify(&mut self, text: String) {
-        self.notice = Some((text, Instant::now()));
+        self.notice = Some(Notice {
+            text,
+            since: Instant::now(),
+            undoable: false,
+        });
     }
 
     /// Clears an old notice and marks the open thread read once it has been
@@ -775,11 +789,11 @@ impl Model {
     }
 
     fn expire_notice(&mut self, now: Instant) -> Option<Duration> {
-        let (text, since) = self.notice.as_ref()?;
-        if text.ends_with('…') {
+        let notice = self.notice.as_ref()?;
+        if notice.text.ends_with('…') {
             return None;
         }
-        let shown = now.saturating_duration_since(*since);
+        let shown = now.saturating_duration_since(notice.since);
         if shown < NOTICE_FOR {
             return Some(NOTICE_FOR - shown);
         }
@@ -934,9 +948,10 @@ impl Model {
             thread_id: thread_id.clone(),
         });
         self.store.apply_change(account, &thread_id, &change)?;
-        self.notify(match self.undo_key.as_str() {
-            "" => format!("{done}."),
-            key => format!("{done}. Press {key} to undo."),
+        self.notice = Some(Notice {
+            text: done.to_owned(),
+            since: Instant::now(),
+            undoable: true,
         });
         self.wants_sync = true;
         self.forget_selection_if_gone(&thread_id)?;
