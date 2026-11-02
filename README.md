@@ -124,7 +124,10 @@ A message on its own, such as a receipt or a newsletter, shows as it was
 designed, the way Gmail shows it, in macOS's own WebKit. Mail keeps control:
 scripts never run, links open in your browser, and remote images stay off
 until you click **Load images**, because loading them tells the sender you
-opened the message. `v` (or **Show as text**) switches to the text reader.
+opened the message. Pictures sent inside the email itself, such as a
+receipt's logo, show straight away: they come from Gmail, not the sender, so
+they give nothing away. Mail reads them the first time you open the email and
+keeps them. `v` (or **Show as text**) switches to the text reader.
 Conversations read as text.
 
 The text reader shows mail as plain text. Web and email links are in blue:

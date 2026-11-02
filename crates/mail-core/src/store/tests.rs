@@ -1,5 +1,5 @@
 use super::{search::fts_expression, *};
-use crate::model::Change;
+use crate::model::{Change, InlineImage};
 
 fn message(
     id: &str,
@@ -768,4 +768,33 @@ fn stored_bodies_are_made_again_once() {
         )
         .unwrap();
     assert_eq!(hits.len(), 1);
+}
+
+#[test]
+fn inline_pictures_are_kept_with_their_message() {
+    let (mut store, account) = store_with_mail();
+    let logo = InlineImage {
+        content_id: "logo@shop".into(),
+        mime_type: "image/png".into(),
+        data: b"\x89PNG made-up".to_vec(),
+    };
+    store
+        .save_inline_images(account, "m1", std::slice::from_ref(&logo))
+        .unwrap();
+    // Saving again replaces rather than duplicates.
+    store
+        .save_inline_images(account, "m1", std::slice::from_ref(&logo))
+        .unwrap();
+    store
+        .save_inline_images(account, "no-such-message", std::slice::from_ref(&logo))
+        .unwrap();
+    assert_eq!(store.inline_images(account, "m1").unwrap(), [logo]);
+    assert!(store.inline_images(account, "m2").unwrap().is_empty());
+
+    store.delete_messages(account, ["m1"]).unwrap();
+    let left: i64 = store
+        .connection()
+        .query_row("SELECT count(*) FROM inline_images", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(left, 0, "they go with the message");
 }

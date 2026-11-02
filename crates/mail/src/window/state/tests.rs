@@ -590,3 +590,109 @@ fn the_header_uses_the_first_name_you_sign_with() {
     // No mail sent from the second account yet.
     assert_eq!(model.first_name(model.accounts[1].id), None);
 }
+
+/// Adds a receipt whose logo is sent inside it, and opens it.
+fn open_receipt(model: &mut Model) -> i64 {
+    let account = model.accounts[0].id;
+    let receipt = Message {
+        gmail_id: "receipt".into(),
+        thread_id: "receipt".into(),
+        internal_date: i64::MAX / 2,
+        subject: "Your receipt".into(),
+        from_name: "Shop".into(),
+        from_addr: "orders@shop.example".into(),
+        body_text: "Thanks for your order.".into(),
+        body_html: Some(r#"<img src="cid:logo@shop"><p>Thanks for your order.</p>"#.into()),
+        label_ids: vec!["INBOX".into()],
+        ..Message::default()
+    };
+    model.store.save_messages(account, &[receipt]).unwrap();
+    model.reload().unwrap();
+    select(model, "Your receipt");
+    account
+}
+
+fn logo() -> InlineImage {
+    InlineImage {
+        content_id: "logo@shop".into(),
+        mime_type: "image/png".into(),
+        data: b"\x89PNG made-up".to_vec(),
+    }
+}
+
+#[test]
+fn pictures_sent_inside_an_email_are_asked_for_once_then_shown() {
+    let (mut model, _folder) = model();
+    let account = open_receipt(&mut model);
+    let [Effect::FetchInlineImages { wanted, .. }] = model.effects.as_slice() else {
+        panic!("expected one request, got {:?}", model.effects);
+    };
+    assert_eq!(wanted, &["logo@shop"]);
+    assert_eq!(model.showing_original().unwrap().inline, 0);
+    model.effects.clear();
+
+    select(
+        &mut model,
+        "This week: async traits, SQLite tips and egui 0.36",
+    );
+    select(&mut model, "Your receipt");
+    assert!(model.effects.is_empty(), "asked for only once");
+
+    model
+        .apply(Action::InlineImagesArrived {
+            account_id: account,
+            message_id: "receipt".into(),
+            images: Ok(vec![logo()]),
+        })
+        .unwrap();
+    let original = model.showing_original().unwrap();
+    assert_eq!(original.inline, 1);
+    assert!(
+        original
+            .html
+            .contains(r#"<img src="data:image/png;base64,"#)
+    );
+
+    // Kept: next time it opens with the logo and asks for nothing.
+    select(
+        &mut model,
+        "This week: async traits, SQLite tips and egui 0.36",
+    );
+    select(&mut model, "Your receipt");
+    assert_eq!(model.showing_original().unwrap().inline, 1);
+    assert!(model.effects.is_empty());
+}
+
+#[test]
+fn pictures_that_could_not_load_are_asked_for_again_next_time() {
+    let (mut model, _folder) = model();
+    let account = open_receipt(&mut model);
+    model.effects.clear();
+    model
+        .apply(Action::InlineImagesArrived {
+            account_id: account,
+            message_id: "receipt".into(),
+            images: Err("network unreachable".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        model.notice(),
+        Some("Could not load the pictures in this email: network unreachable")
+    );
+    select(
+        &mut model,
+        "This week: async traits, SQLite tips and egui 0.36",
+    );
+    select(&mut model, "Your receipt");
+    assert_eq!(model.effects.len(), 1);
+}
+
+#[test]
+fn pictures_are_only_asked_for_while_the_original_shows() {
+    let (mut model, _folder) = model();
+    model.show_original = false;
+    open_receipt(&mut model);
+    assert!(model.effects.is_empty());
+    model.apply(Action::ToggleOriginal).unwrap();
+    assert_eq!(model.effects.len(), 1);
+}

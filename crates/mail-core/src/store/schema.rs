@@ -142,6 +142,18 @@ pub(super) const MIGRATIONS: &[&str] = &[
     CREATE TABLE body_refresh (message_id INTEGER PRIMARY KEY);
     INSERT INTO body_refresh (message_id) SELECT id FROM messages;
     "#,
+    // 6. Pictures sent inside messages, which their HTML shows by cid:
+    // reference. Read from Gmail the first time a message is shown as
+    // designed; see gmail::inline.
+    r#"
+    CREATE TABLE inline_images (
+        message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        content_id TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        data BLOB NOT NULL,
+        PRIMARY KEY (message_id, content_id)
+    );
+    "#,
 ];
 
 pub(super) const LATEST: i64 = MIGRATIONS.len() as i64;

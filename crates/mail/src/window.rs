@@ -251,6 +251,7 @@ impl Shell {
         let page = Page {
             message_id: html.message_id.clone(),
             images: html.images,
+            inline: html.inline,
         };
         let shown = original.show(frame, ctx, rect, &page, || html.html.clone());
         if let Err(error) = shown {
@@ -378,7 +379,7 @@ impl Shell {
             None => return,
         };
         for event in events {
-            self.model.notify(match event {
+            let notice = match event {
                 downloads::Event::Saved { path } => {
                     let name = path
                         .file_name()
@@ -394,7 +395,20 @@ impl Shell {
                 downloads::Event::Failed { filename, error } => {
                     format!("Could not download {filename}: {error}")
                 }
-            });
+                downloads::Event::InlineImages {
+                    account_id,
+                    message_id,
+                    images,
+                } => {
+                    self.apply(Action::InlineImagesArrived {
+                        account_id,
+                        message_id,
+                        images,
+                    });
+                    continue;
+                }
+            };
+            self.model.notify(notice);
         }
     }
 
@@ -447,6 +461,17 @@ impl Shell {
                 Effect::UseGooglePhoto(email) => {
                     let _ = fs::remove_file(self.paths.chosen_photo(&email));
                     self.screen.forget_photo(&email);
+                    None
+                }
+                Effect::FetchInlineImages {
+                    account,
+                    account_id,
+                    message_id,
+                    wanted,
+                } => {
+                    if let Some(downloader) = &self.downloader {
+                        downloader.inline_images(account, account_id, message_id, wanted);
+                    }
                     None
                 }
                 Effect::OpenHtml { message_id, html } => {

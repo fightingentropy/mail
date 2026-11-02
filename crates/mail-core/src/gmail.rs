@@ -7,6 +7,7 @@
 pub mod attachments;
 mod client;
 mod html;
+pub mod inline;
 mod message;
 
 use serde::Deserialize;

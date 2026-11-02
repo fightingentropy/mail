@@ -30,11 +30,13 @@ use wry::{
 
 use super::files;
 
-/// What the view shows: one message, with or without its remote images.
+/// What the view shows: one message, with or without its remote images,
+/// and with as many of the pictures sent inside it as Mail has.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Page {
     pub message_id: String,
     pub images: bool,
+    pub inline: usize,
 }
 
 /// Forwards key presses from the page to the window. Runs as WebKit's own

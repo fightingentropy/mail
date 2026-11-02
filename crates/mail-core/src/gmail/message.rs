@@ -64,7 +64,7 @@ pub struct Body {
 }
 
 impl Part {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(super) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|header| header.name.eq_ignore_ascii_case(name))

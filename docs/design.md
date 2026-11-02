@@ -290,6 +290,22 @@ Rules:
    use the text reader. Checked on a real newsletter: 18 images, none
    fetched until allowed.
 
+   *Pictures sent inside a message* (added after): HTML can show a MIME part
+   by `cid:` reference, as receipts and booking emails do for logos and
+   icons. Sync doesn't record Content-IDs, and parts without a file name
+   aren't attachments, so the first time such a message shows as an
+   original Mail reads it from Gmail once for its parts, then fetches each
+   referenced part on the download thread. A part counts only if its first
+   bytes are a picture (senders often label them `application/octet-stream`)
+   or it is labelled `image/*`. Parts labelled as anything else, or over
+   5 MB, are skipped without being downloaded. They are kept in
+   `inline_images` (migration 6), are deleted with their message, and are
+   swapped into the HTML as `data:` addresses, which the content policy
+   already allows. They load before "Load images" because they come from
+   Gmail and tell the sender nothing. A failed read is retried the next time
+   the message opens. Checked on six real messages (Booking.com, Everyman,
+   Workday and others): 24 of 24 pictures found.
+
    *Readable newsletters* (added after): a text part is kept as written
    unless it looks machine-made (leftover `&nbsp;`, markup indentation, four
    or more empty lines in a row, five or more tracking links over 80

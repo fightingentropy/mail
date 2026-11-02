@@ -11,7 +11,10 @@ use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 use rusqlite::{Connection, OptionalExtension, params, types::ValueRef};
 
 use super::Store;
-use crate::{gmail, model::BodyLink};
+use crate::{
+    gmail,
+    model::{BodyLink, InlineImage},
+};
 
 impl Store {
     /// The HTML version of a stored message, if it has one.
@@ -26,6 +29,57 @@ impl Store {
             )
             .optional()?;
         Ok(html)
+    }
+
+    /// The pictures kept for a message's HTML.
+    pub fn inline_images(
+        &self,
+        account_id: i64,
+        gmail_id: &str,
+    ) -> anyhow::Result<Vec<InlineImage>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT i.content_id, i.mime_type, i.data FROM inline_images i
+             JOIN messages m ON m.id = i.message_id
+             WHERE m.account_id = ?1 AND m.gmail_id = ?2 ORDER BY i.content_id",
+        )?;
+        let images = statement
+            .query_map(params![account_id, gmail_id], |row| {
+                Ok(InlineImage {
+                    content_id: row.get(0)?,
+                    mime_type: row.get(1)?,
+                    data: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(images)
+    }
+
+    /// Keeps pictures read from Gmail for a message's HTML. They go when the
+    /// message does.
+    pub fn save_inline_images(
+        &mut self,
+        account_id: i64,
+        gmail_id: &str,
+        images: &[InlineImage],
+    ) -> anyhow::Result<()> {
+        let transaction = self.connection.transaction()?;
+        {
+            let mut insert = transaction.prepare(
+                "INSERT OR REPLACE INTO inline_images (message_id, content_id, mime_type, data)
+                 SELECT id, ?3, ?4, ?5 FROM messages WHERE account_id = ?1 AND gmail_id = ?2",
+            )?;
+            for image in images {
+                insert.execute(params![
+                    account_id,
+                    gmail_id,
+                    image.content_id,
+                    image.mime_type,
+                    image.data
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
     }
 }
 

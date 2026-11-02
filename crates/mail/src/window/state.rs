@@ -3,13 +3,14 @@
 //! at the keyboard.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     time::{Duration, Instant},
 };
 
 use mail_core::{
     compose::Draft,
-    model::{Account, Attachment, Change, Label, LabelKind, Message, ThreadSummary},
+    gmail::inline,
+    model::{Account, Attachment, Change, InlineImage, Label, LabelKind, Message, ThreadSummary},
     store::{Order, SearchQuery, Store, ThreadFilter},
 };
 
@@ -96,6 +97,12 @@ pub enum Action {
     ChoosePhoto,
     /// Drops the chosen photo, going back to Google's.
     UseGooglePhoto,
+    /// Pictures sent inside a message, read from Gmail, or why none came.
+    InlineImagesArrived {
+        account_id: i64,
+        message_id: String,
+        images: Result<Vec<InlineImage>, String>,
+    },
 }
 
 /// Work for the window shell that the model can't do itself: open a link,
@@ -136,6 +143,14 @@ pub enum Effect {
     /// Pick an image file for this account's photo.
     ChoosePhoto(String),
     UseGooglePhoto(String),
+    /// Read the pictures with these Content-IDs, for the original. `account`
+    /// is the address of the account the message belongs to.
+    FetchInlineImages {
+        account: String,
+        account_id: i64,
+        message_id: String,
+        wanted: Vec<String>,
+    },
 }
 
 /// Who and what a send goes to, as the confirmation shows it.
@@ -149,9 +164,15 @@ pub struct SendSummary {
 /// A message's HTML, for showing it as it was designed.
 pub struct OriginalHtml {
     pub message_id: String,
+    /// With the pictures sent inside it in place, as far as Mail has them.
     pub html: String,
     /// Remote images may load: they tell the sender you opened it.
     pub images: bool,
+    /// How many of the pictures sent inside it are in place, so the view
+    /// shows them when they arrive.
+    pub inline: usize,
+    /// The Content-IDs of pictures it shows that Mail doesn't have yet.
+    missing: Vec<String>,
 }
 
 /// The thread in the reader.
@@ -218,6 +239,9 @@ pub struct Model {
     pub effects: Vec<Effect>,
     undo: Option<Undo>,
     viewed_since: Option<Instant>,
+    /// Messages whose inline pictures were asked of Gmail since Mail
+    /// started, so a picture Gmail doesn't have isn't asked for again.
+    inline_requested: HashSet<(i64, String)>,
 }
 
 impl Model {
@@ -246,6 +270,7 @@ impl Model {
             effects: Vec::new(),
             undo: None,
             viewed_since: None,
+            inline_requested: HashSet::new(),
         };
         model.reload()?;
         Ok(model)
@@ -649,6 +674,7 @@ impl Model {
                     .is_some_and(|open| open.original.is_some())
                 {
                     self.show_original = !self.show_original;
+                    self.request_inline_images();
                 } else {
                     self.notify("This one reads as text. h opens its HTML in your browser.".into());
                 }
@@ -656,6 +682,44 @@ impl Model {
             Action::LoadImages => {
                 if let Some(original) = self.open.as_mut().and_then(|open| open.original.as_mut()) {
                     original.images = true;
+                }
+            }
+            Action::InlineImagesArrived {
+                account_id,
+                message_id,
+                images,
+            } => {
+                let images = match images {
+                    Ok(images) => images,
+                    Err(error) => {
+                        // Try again the next time it is opened.
+                        self.inline_requested.remove(&(account_id, message_id));
+                        self.notify(format!(
+                            "Could not load the pictures in this email: {error}"
+                        ));
+                        return Ok(());
+                    }
+                };
+                self.store
+                    .save_inline_images(account_id, &message_id, &images)?;
+                // Put them in place if the message is still open.
+                let shown = self.open.as_ref().and_then(|open| {
+                    let original = open.original.as_ref()?;
+                    (open.account_id == account_id && original.message_id == message_id)
+                        .then_some(original.images)
+                });
+                if let Some(remote_images) = shown
+                    && !images.is_empty()
+                {
+                    let original =
+                        self.original(account_id, &message_id)?
+                            .map(|original| OriginalHtml {
+                                images: remote_images,
+                                ..original
+                            });
+                    if let Some(open) = &mut self.open {
+                        open.original = original;
+                    }
                 }
             }
             Action::ChoosePhoto | Action::UseGooglePhoto => {
@@ -780,7 +844,14 @@ impl Model {
             .map(|(message, _)| message.gmail_id.clone());
         // HTML stays compressed in the database until it is asked for.
         let html = match &newest {
-            Some(message_id) => self.store.message_html(open.account_id, message_id)?,
+            Some(message_id) => self
+                .store
+                .message_html(open.account_id, message_id)?
+                .map(|html| -> anyhow::Result<String> {
+                    let images = self.store.inline_images(open.account_id, message_id)?;
+                    Ok(inline::embed(&html, &images).into_owned())
+                })
+                .transpose()?,
             None => None,
         };
         match newest.zip(html) {
@@ -936,14 +1007,7 @@ impl Model {
             .map(|(index, message)| index == last || message.has_label("UNREAD"))
             .collect();
         let original = match messages.as_slice() {
-            [message] if message.has_html => self
-                .store
-                .message_html(account, &message.gmail_id)?
-                .map(|html| OriginalHtml {
-                    message_id: message.gmail_id.clone(),
-                    html,
-                    images: false,
-                }),
+            [message] if message.has_html => self.original(account, &message.gmail_id)?,
             _ => None,
         };
         self.open = Some(OpenThread {
@@ -955,7 +1019,56 @@ impl Model {
             expanded,
         });
         self.viewed_since = Some(Instant::now());
+        self.request_inline_images();
         Ok(())
+    }
+
+    /// A message's HTML with the pictures sent inside it that Mail has.
+    fn original(&self, account_id: i64, message_id: &str) -> anyhow::Result<Option<OriginalHtml>> {
+        let Some(html) = self.store.message_html(account_id, message_id)? else {
+            return Ok(None);
+        };
+        let wanted = inline::content_ids(&html);
+        let images = if wanted.is_empty() {
+            Vec::new()
+        } else {
+            self.store.inline_images(account_id, message_id)?
+        };
+        let missing = wanted
+            .into_iter()
+            .filter(|id| !images.iter().any(|image| image.content_id == *id))
+            .collect();
+        Ok(Some(OriginalHtml {
+            message_id: message_id.to_owned(),
+            html: inline::embed(&html, &images).into_owned(),
+            images: false,
+            inline: images.len(),
+            missing,
+        }))
+    }
+
+    /// Asks Gmail for the pictures the original on screen lacks, once.
+    fn request_inline_images(&mut self) {
+        let Some(open) = &self.open else {
+            return;
+        };
+        let Some(original) = self.showing_original() else {
+            return;
+        };
+        let key = (open.account_id, original.message_id.clone());
+        if original.missing.is_empty() || self.inline_requested.contains(&key) {
+            return;
+        }
+        let Some(account) = self.account(open.account_id) else {
+            return;
+        };
+        self.effects.push(Effect::FetchInlineImages {
+            account: account.email.clone(),
+            account_id: open.account_id,
+            message_id: original.message_id.clone(),
+            wanted: original.missing.clone(),
+        });
+        self.inline_requested.insert(key);
     }
 }
 

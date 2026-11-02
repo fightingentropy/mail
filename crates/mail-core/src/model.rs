@@ -160,6 +160,16 @@ pub struct BodyLink {
     pub url: String,
 }
 
+/// A picture sent inside a message, which its HTML shows by `cid:`
+/// reference, as receipts show their logo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineImage {
+    /// The Content-ID as the HTML refers to it.
+    pub content_id: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
 /// Attachment metadata. Contents are downloaded only when opened.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Attachment {

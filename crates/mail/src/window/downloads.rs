@@ -1,6 +1,7 @@
 //! Attachments download on a thread of their own: a large file never stalls
-//! the window, and a download never waits behind a long first sync. Like the
-//! sync thread, it ends with the window.
+//! the window, and a download never waits behind a long first sync. Pictures
+//! sent inside a message are read here too. Like the sync thread, it ends
+//! with the window.
 
 use std::{
     collections::HashMap,
@@ -11,8 +12,8 @@ use std::{
 
 use anyhow::Context;
 use mail_core::{
-    gmail::{GmailClient, attachments},
-    model::Attachment,
+    gmail::{GmailClient, attachments, inline},
+    model::{Attachment, InlineImage},
     paths::{self, Paths},
 };
 
@@ -27,13 +28,28 @@ pub enum Event {
         filename: String,
         error: String,
     },
+    /// The pictures sent inside a message that Gmail had, or why none came.
+    InlineImages {
+        account_id: i64,
+        message_id: String,
+        images: Result<Vec<InlineImage>, String>,
+    },
 }
 
 struct Job {
     /// The address of the account the message belongs to.
     account: String,
     message_id: String,
-    attachment: Attachment,
+    work: Work,
+}
+
+enum Work {
+    Attachment(Attachment),
+    /// The pictures with these Content-IDs, for the account with this ID.
+    InlineImages {
+        account_id: i64,
+        wanted: Vec<String>,
+    },
 }
 
 pub struct Downloader {
@@ -58,7 +74,22 @@ impl Downloader {
         let _ = self.jobs.send(Job {
             account,
             message_id,
-            attachment,
+            work: Work::Attachment(attachment),
+        });
+    }
+
+    /// Queues reading the pictures sent inside a message.
+    pub fn inline_images(
+        &self,
+        account: String,
+        account_id: i64,
+        message_id: String,
+        wanted: Vec<String>,
+    ) {
+        let _ = self.jobs.send(Job {
+            account,
+            message_id,
+            work: Work::InlineImages { account_id, wanted },
         });
     }
 }
@@ -69,14 +100,22 @@ fn run(paths: Paths, jobs: Receiver<Job>, events: Sender<Event>, wake: impl Fn()
     // of a message.
     let mut clients: HashMap<String, GmailClient> = HashMap::new();
     for job in jobs {
-        let event = match download(&paths, &mut clients, &job) {
-            Ok(path) => Event::Saved { path },
+        let event = match carry_out(&paths, &mut clients, &job) {
+            Ok(event) => event,
             Err(error) => {
                 // Connect afresh next time: the token may have changed.
                 clients.remove(&job.account);
-                Event::Failed {
-                    filename: job.attachment.filename.clone(),
-                    error: format!("{error:#}"),
+                let error = format!("{error:#}");
+                match &job.work {
+                    Work::Attachment(attachment) => Event::Failed {
+                        filename: attachment.filename.clone(),
+                        error,
+                    },
+                    Work::InlineImages { account_id, .. } => Event::InlineImages {
+                        account_id: *account_id,
+                        message_id: job.message_id.clone(),
+                        images: Err(error),
+                    },
                 }
             }
         };
@@ -87,17 +126,27 @@ fn run(paths: Paths, jobs: Receiver<Job>, events: Sender<Event>, wake: impl Fn()
     }
 }
 
-fn download(
+fn carry_out(
     paths: &Paths,
     clients: &mut HashMap<String, GmailClient>,
     job: &Job,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<Event> {
     if !clients.contains_key(&job.account) {
         clients.insert(job.account.clone(), accounts::client(paths, &job.account)?);
     }
     let gmail = &clients[&job.account];
-    let bytes = attachments::fetch(gmail, &job.message_id, &job.attachment)?;
-    let folder = paths::downloads()?;
-    attachments::save(&folder, &job.attachment.filename, &bytes)
-        .with_context(|| format!("Could not save to {}", folder.display()))
+    match &job.work {
+        Work::Attachment(attachment) => {
+            let bytes = attachments::fetch(gmail, &job.message_id, attachment)?;
+            let folder = paths::downloads()?;
+            let path = attachments::save(&folder, &attachment.filename, &bytes)
+                .with_context(|| format!("Could not save to {}", folder.display()))?;
+            Ok(Event::Saved { path })
+        }
+        Work::InlineImages { account_id, wanted } => Ok(Event::InlineImages {
+            account_id: *account_id,
+            message_id: job.message_id.clone(),
+            images: Ok(inline::fetch(gmail, &job.message_id, wanted)?),
+        }),
+    }
 }
