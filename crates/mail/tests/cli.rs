@@ -52,6 +52,7 @@ fn seeded() -> tempfile::TempDir {
                         mime_type: "application/pdf".into(),
                         size: 30_000,
                         gmail_attachment_id: None,
+                        shown_in_html: false,
                     }],
                     ..base.clone()
                 },

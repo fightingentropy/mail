@@ -1148,6 +1148,20 @@ fn original_reader(
         });
     });
     ui.add_space(12.0);
+    // Files sent with the message. Pictures it shows are on the page.
+    if message.attachments.iter().any(|file| !file.shown_in_html) {
+        ui.horizontal_wrapped(|ui| {
+            for (number, file) in message.attachments.iter().enumerate() {
+                if !file.shown_in_html && attachment_chip(ui, file) {
+                    actions.push(Action::Download {
+                        message: 0,
+                        attachment: number,
+                    });
+                }
+            }
+        });
+        ui.add_space(12.0);
+    }
 
     let top = ui.min_rect().bottom();
     let page = egui::Rect::from_min_max(Pos2::new(column.left(), top), column.max);

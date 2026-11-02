@@ -181,4 +181,8 @@ pub struct Attachment {
     /// Gmail may issue a new ID on every fetch, so re-read the message if a
     /// download with this one fails.
     pub gmail_attachment_id: Option<String>,
+    /// A picture the message's HTML shows by `cid:` reference. The designed
+    /// view leaves it out, as Gmail does; the text reader lists it, as it
+    /// can't show it.
+    pub shown_in_html: bool,
 }

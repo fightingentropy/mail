@@ -9,7 +9,7 @@ use base64::{
 use encoding_rs::{Encoding, UTF_8};
 use serde::Deserialize;
 
-use super::html;
+use super::{html, inline};
 use crate::model::{Attachment, BodyLink, Message};
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -71,6 +71,17 @@ impl Part {
             .map(|header| header.value.as_str())
     }
 
+    /// The part's Content-ID, which is written in angle brackets.
+    pub(super) fn content_id(&self) -> Option<String> {
+        let id = self
+            .header("Content-ID")?
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .trim();
+        (!id.is_empty()).then(|| id.to_owned())
+    }
+
     fn is_attachment(&self) -> bool {
         let disposition = self.header("Content-Disposition").unwrap_or_default();
         !self.filename.is_empty()
@@ -110,6 +121,21 @@ pub fn parse_message(api: ApiMessage) -> Message {
     let mut found = Found::default();
     collect(&root, &mut found);
     let (body_text, body_links) = body(found.text.as_deref(), found.html.as_deref());
+    // A picture the HTML shows is part of the message, not a file sent with it.
+    let shown = found
+        .html
+        .as_deref()
+        .map(inline::content_ids)
+        .unwrap_or_default();
+    let attachments = found
+        .attachments
+        .into_iter()
+        .map(|(mut attachment, id)| {
+            attachment.shown_in_html =
+                id.is_some_and(|id| shown.iter().any(|shown| shown.eq_ignore_ascii_case(&id)));
+            attachment
+        })
+        .collect();
 
     Message {
         gmail_id: api.id,
@@ -131,7 +157,7 @@ pub fn parse_message(api: ApiMessage) -> Message {
         references: header("References"),
         size_estimate: api.size_estimate,
         label_ids: api.label_ids,
-        attachments: found.attachments,
+        attachments,
     }
 }
 
@@ -139,7 +165,8 @@ pub fn parse_message(api: ApiMessage) -> Message {
 struct Found {
     text: Option<String>,
     html: Option<String>,
-    attachments: Vec<Attachment>,
+    /// Each with its Content-ID when it could be a picture the HTML shows.
+    attachments: Vec<(Attachment, Option<String>)>,
 }
 
 /// Walks the MIME tree depth first. The first text/plain and text/html parts
@@ -148,13 +175,18 @@ struct Found {
 fn collect(part: &Part, found: &mut Found) {
     if part.is_attachment() {
         let body = part.body.clone().unwrap_or_default();
-        found.attachments.push(Attachment {
+        let attachment = Attachment {
             part_id: part.part_id.clone(),
             filename: decode_words(&part.filename),
             mime_type: part.mime_type.clone(),
             size: body.size,
             gmail_attachment_id: body.attachment_id,
-        });
+            shown_in_html: false,
+        };
+        let content_id = part
+            .content_id()
+            .filter(|_| inline::could_be_image(&part.mime_type));
+        found.attachments.push((attachment, content_id));
         return;
     }
     match part.mime_type.to_ascii_lowercase().as_str() {

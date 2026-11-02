@@ -161,6 +161,7 @@ fn reads_a_thread_with_labels_and_attachments() {
         mime_type: "application/pdf".into(),
         size: 2048,
         gmail_attachment_id: Some("att-1".into()),
+        shown_in_html: false,
     });
     store.save_messages(account, &[with_file.clone()]).unwrap();
 
@@ -768,6 +769,70 @@ fn stored_bodies_are_made_again_once() {
         )
         .unwrap();
     assert_eq!(hits.len(), 1);
+}
+
+#[test]
+fn messages_that_may_show_their_own_pictures_are_read_again() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("mail.sqlite3");
+    let with = |id: &str, date: i64, html: bool, mime: &str| {
+        let mut message = message(
+            id,
+            id,
+            date,
+            "Shop <shop@example.org>",
+            "Receipt",
+            "Thanks",
+            &["INBOX"],
+        );
+        message.has_html = html;
+        message.body_html = html.then(|| "<img src=\"cid:logo\">".to_owned());
+        message.attachments.push(Attachment {
+            part_id: "1".into(),
+            filename: "file".into(),
+            mime_type: mime.into(),
+            size: 100,
+            ..Attachment::default()
+        });
+        message
+    };
+    let account = {
+        let mut store = Store::open(&path).unwrap();
+        let account = store.add_account("me@example.com").unwrap();
+        store
+            .save_messages(
+                account.id,
+                &[
+                    with("logo", 1_000, true, "image/png"),
+                    with("unlabelled", 2_000, true, "Application/Octet-Stream"),
+                    with("pdf", 3_000, true, "application/pdf"),
+                    with("text-only", 4_000, false, "image/png"),
+                ],
+            )
+            .unwrap();
+        // As version 6 of Mail left it.
+        store
+            .connection()
+            .execute_batch(
+                "ALTER TABLE attachments DROP COLUMN shown_in_html;
+                 PRAGMA user_version = 6;",
+            )
+            .unwrap();
+        account.id
+    };
+
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.pending_bodies(account, 10).unwrap(),
+        ["unlabelled", "logo"]
+    );
+    // Read again, a picture the HTML shows keeps its mark.
+    let mut logo = with("logo", 1_000, true, "image/png");
+    logo.attachments[0].shown_in_html = true;
+    store.save_messages(account, &[logo]).unwrap();
+    let logo = store.message(account, "logo").unwrap().unwrap();
+    assert!(!logo.body_pending);
+    assert!(logo.attachments[0].shown_in_html);
 }
 
 #[test]

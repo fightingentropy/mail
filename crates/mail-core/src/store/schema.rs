@@ -154,6 +154,19 @@ pub(super) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (message_id, content_id)
     );
     "#,
+    // 7. Which attachments are pictures the message's HTML shows, so the
+    // designed view can leave them out. Content-IDs weren't stored, so
+    // messages with HTML and an attachment that could be a picture are read
+    // from Gmail again, as bodies to fill in.
+    r#"
+    ALTER TABLE attachments ADD COLUMN shown_in_html INTEGER NOT NULL DEFAULT 0;
+    UPDATE messages SET body_pending = 1 WHERE id IN (
+        SELECT a.message_id FROM attachments a
+        JOIN message_bodies b ON b.message_id = a.message_id
+        WHERE lower(a.mime_type) LIKE 'image/%'
+           OR lower(a.mime_type) = 'application/octet-stream'
+    );
+    "#,
 ];
 
 pub(super) const LATEST: i64 = MIGRATIONS.len() as i64;

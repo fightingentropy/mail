@@ -97,6 +97,7 @@ fn multipart_message_with_attachment() {
             mime_type: "application/pdf".into(),
             size: 45000,
             gmail_attachment_id: Some("ANGjdJ8".into()),
+            shown_in_html: false,
         }]
     );
 }
@@ -198,4 +199,62 @@ fn a_list_of_tracking_links_counts_as_machine_made() {
         Some("<p><a href=\"https://shop.example\">Sale</a></p>"),
     );
     assert_eq!(text, "Sale");
+}
+
+#[test]
+fn pictures_the_html_shows_are_marked() {
+    let part = |id: &str, mime: &str, filename: &str, content_id: Option<&str>| {
+        let mut headers = vec![json!({"name": "Content-Disposition", "value": "inline"})];
+        if let Some(content_id) = content_id {
+            headers.push(json!({"name": "Content-ID", "value": content_id}));
+        }
+        json!({
+            "partId": id,
+            "mimeType": mime,
+            "filename": filename,
+            "headers": headers,
+            "body": {"size": 1200, "attachmentId": format!("att-{id}")}
+        })
+    };
+    let html = "<img src=\"cid:logo@shop\"><img src='cid:Stamp@Shop'><p>Thanks</p>";
+    let message = parse_message(api(json!({
+        "id": "receipt",
+        "threadId": "receipt",
+        "payload": {
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {
+                    "partId": "0",
+                    "mimeType": "multipart/related",
+                    "parts": [
+                        {"partId": "0.0", "mimeType": "text/html", "body": {"size": 80, "data": b64(html)}},
+                        part("0.1", "image/png", "logo.png", Some("<logo@shop>")),
+                        // Matched whatever the case, and whatever the label.
+                        part("0.2", "application/octet-stream", "stamp.gif", Some("<stamp@shop>")),
+                        // A picture the HTML doesn't show is an attachment.
+                        part("0.3", "image/jpeg", "photo.jpg", Some("<photo@shop>")),
+                    ]
+                },
+                // So is a document, even if the HTML names it.
+                part("1", "application/pdf", "receipt.pdf", Some("<logo@shop>")),
+                part("2", "image/png", "scan.png", None),
+            ]
+        }
+    })));
+
+    let shown: Vec<(&str, bool)> = message
+        .attachments
+        .iter()
+        .map(|attachment| (attachment.filename.as_str(), attachment.shown_in_html))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("logo.png", true),
+            ("stamp.gif", true),
+            ("photo.jpg", false),
+            ("receipt.pdf", false),
+            ("scan.png", false),
+        ]
+    );
 }

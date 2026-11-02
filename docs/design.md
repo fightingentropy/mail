@@ -304,7 +304,14 @@ Rules:
    already allows. They load before "Load images" because they come from
    Gmail and tell the sender nothing. A failed read is retried the next time
    the message opens. Checked on six real messages (Booking.com, Everyman,
-   Workday and others): 24 of 24 pictures found.
+   Workday and others): 24 of 24 pictures found. The designed view lists
+   the message's files above the page and, as in Gmail, leaves out such
+   pictures: parsing marks an attachment `shown_in_html` when it could be a
+   picture and the HTML references its Content-ID. The text reader still
+   lists them, since it can't show them, and conversations read as text.
+   Content-IDs weren't stored before, so migration 7 marks messages with
+   HTML and an attachment that could be a picture as bodies to fill in, and
+   the next sync reads them again (39 of a real mailbox's messages).
 
    *Readable newsletters* (added after): a text part is kept as written
    unless it looks machine-made (leftover `&nbsp;`, markup indentation, four

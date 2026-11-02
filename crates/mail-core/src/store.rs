@@ -288,8 +288,8 @@ impl Store {
             let mut clear_attachments =
                 transaction.prepare("DELETE FROM attachments WHERE message_id = ?1")?;
             let mut insert_attachment = transaction.prepare(
-                "INSERT INTO attachments (message_id, part_id, filename, mime_type, size, gmail_attachment_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO attachments (message_id, part_id, filename, mime_type, size, gmail_attachment_id, shown_in_html)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
 
             for message in messages {
@@ -329,6 +329,7 @@ impl Store {
                         attachment.mime_type,
                         attachment.size,
                         attachment.gmail_attachment_id,
+                        attachment.shown_in_html,
                     ])?;
                 }
             }
@@ -474,7 +475,7 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?;
 
         let mut attachments = self.connection.prepare_cached(
-            "SELECT part_id, filename, mime_type, size, gmail_attachment_id
+            "SELECT part_id, filename, mime_type, size, gmail_attachment_id, shown_in_html
              FROM attachments WHERE message_id = ?1 ORDER BY part_id",
         )?;
         message.attachments = attachments
@@ -485,6 +486,7 @@ impl Store {
                     mime_type: row.get(2)?,
                     size: row.get(3)?,
                     gmail_attachment_id: row.get(4)?,
+                    shown_in_html: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;

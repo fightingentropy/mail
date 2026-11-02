@@ -127,7 +127,9 @@ until you click **Load images**, because loading them tells the sender you
 opened the message. Pictures sent inside the email itself, such as a
 receipt's logo, show straight away: they come from Gmail, not the sender, so
 they give nothing away. Mail reads them the first time you open the email and
-keeps them. `v` (or **Show as text**) switches to the text reader.
+keeps them. Files sent with the email, such as a PDF ticket, are listed above
+it; as in Gmail, the pictures it shows aren't. `v` (or **Show as text**)
+switches to the text reader, which lists every attachment, pictures too.
 Conversations read as text.
 
 The text reader shows mail as plain text. Web and email links are in blue:

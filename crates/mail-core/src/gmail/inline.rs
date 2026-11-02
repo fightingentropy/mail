@@ -176,17 +176,10 @@ fn find_part<'a>(parts: &[(String, &'a Part)], id: &str) -> Option<&'a Part> {
         .map(|(_, part)| *part)
 }
 
-/// Every part with a Content-ID, which is written in angle brackets.
+/// Every part with a Content-ID.
 fn collect<'a>(part: &'a Part, found: &mut Vec<(String, &'a Part)>) {
-    if let Some(id) = part.header("Content-ID") {
-        let id = id
-            .trim()
-            .trim_start_matches('<')
-            .trim_end_matches('>')
-            .trim();
-        if !id.is_empty() {
-            found.push((id.to_owned(), part));
-        }
+    if let Some(id) = part.content_id() {
+        found.push((id, part));
     }
     for child in &part.parts {
         collect(child, found);
@@ -195,7 +188,7 @@ fn collect<'a>(part: &'a Part, found: &mut Vec<(String, &'a Part)>) {
 
 /// Whether a part's label leaves room for a picture: senders often label
 /// pictures as `application/octet-stream`, but never as `application/pdf`.
-fn could_be_image(declared: &str) -> bool {
+pub(super) fn could_be_image(declared: &str) -> bool {
     let declared = declared.trim().to_ascii_lowercase();
     declared.starts_with("image/") || declared == "application/octet-stream" || declared.is_empty()
 }

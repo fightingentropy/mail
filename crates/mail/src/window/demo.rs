@@ -281,6 +281,7 @@ fn seed_account(
                     mime_type: mime_type.into(),
                     size,
                     gmail_attachment_id: None,
+                    shown_in_html: false,
                 })
                 .into_iter()
                 .collect(),
