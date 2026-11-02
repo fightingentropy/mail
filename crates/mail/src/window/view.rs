@@ -1054,15 +1054,7 @@ fn reader(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut V
                 if open.original.is_some() && screen.original_available {
                     ui.add_space(8.0);
                     let toggle = screen.keys.keymap.hint(Bindable::ToggleOriginal);
-                    let label = if toggle.is_empty() {
-                        "Show original".to_owned()
-                    } else {
-                        format!("Show original   {toggle}")
-                    };
-                    if ui
-                        .button(RichText::new(label).font(theme::regular(13.5)))
-                        .clicked()
-                    {
+                    if pill_button(ui, ButtonIcon::Original, "Show original", &toggle).clicked() {
                         actions.push(Action::ToggleOriginal);
                     }
                 }
@@ -1129,45 +1121,33 @@ fn original_reader(
         && !message.from_addr.eq_ignore_ascii_case(own_address))
     .then(|| format!("<{}>", message.from_addr));
     message_header(ui, message, own_address, address.as_deref());
-    ui.add(
-        egui::Label::new(
-            RichText::new(format!("to {}", message.to))
-                .font(theme::regular(13.5))
-                .color(palette.dim),
-        )
-        .truncate(),
-    );
-    ui.add_space(12.0);
+    // The buttons share the "to" line, on the right, so the page starts higher.
     let toggle = screen.keys.keymap.hint(Bindable::ToggleOriginal);
     ui.horizontal(|ui| {
-        if !original.images {
-            ui.label(
-                RichText::new("Images are off, so the sender can't see you opened this.")
-                    .font(theme::regular(13.5))
-                    .color(palette.dim),
-            );
-            if ui
-                .button(RichText::new("Load images").font(theme::regular(13.5)))
-                .clicked()
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if pill_button(ui, ButtonIcon::Text, "Show as text", &toggle).clicked() {
+                actions.push(Action::ToggleOriginal);
+            }
+            if !original.images
+                && pill_button(ui, ButtonIcon::Picture, "Load images", "")
+                    .on_hover_text("Loading them tells the sender you opened this")
+                    .clicked()
             {
                 actions.push(Action::LoadImages);
             }
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let label = if toggle.is_empty() {
-                "Show as text".to_owned()
-            } else {
-                format!("Show as text   {toggle}")
-            };
-            if ui
-                .button(RichText::new(label).font(theme::regular(13.5)))
-                .clicked()
-            {
-                actions.push(Action::ToggleOriginal);
-            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("to {}", message.to))
+                            .font(theme::regular(13.5))
+                            .color(palette.dim),
+                    )
+                    .truncate(),
+                );
+            });
         });
     });
-    ui.add_space(10.0);
+    ui.add_space(12.0);
 
     let top = ui.min_rect().bottom();
     let page = egui::Rect::from_min_max(Pos2::new(column.left(), top), column.max);
@@ -1175,6 +1155,120 @@ fn original_reader(
     ui.painter()
         .rect_filled(page, CornerRadius::ZERO, Color32::WHITE);
     screen.original_rect = Some(page);
+}
+
+enum ButtonIcon {
+    /// A framed picture with a hill and a sun.
+    Picture,
+    /// Lines of text.
+    Text,
+    /// A page with a banner across its top, as designed mail has.
+    Original,
+}
+
+/// A quiet rounded button: a small icon, its words and, when the action has
+/// a shortcut, the shortcut in a key cap.
+fn pill_button(ui: &mut egui::Ui, icon: ButtonIcon, text: &str, key: &str) -> egui::Response {
+    let palette = theme::palette(ui.ctx());
+    let words = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), theme::regular(13.5), palette.text);
+    let cap = (!key.is_empty()).then(|| {
+        ui.painter()
+            .layout_no_wrap(key.to_owned(), theme::medium(12.0), palette.secondary)
+    });
+    let cap_width = cap
+        .as_ref()
+        .map_or(0.0, |cap| (cap.size().x + 10.0).max(20.0));
+    let (padding, icon_width, gap) = (11.0, 14.0, 7.0);
+    let width = padding
+        + icon_width
+        + gap
+        + words.size().x
+        + if cap.is_some() {
+            gap + cap_width + 6.0
+        } else {
+            padding
+        };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::click());
+    let fill = if response.hovered() {
+        palette.selected
+    } else {
+        palette.field
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(8), fill);
+
+    let center = Pos2::new(rect.left() + padding + icon_width / 2.0, rect.center().y);
+    let stroke = Stroke::new(1.3, palette.secondary);
+    let line = |points: &[(f32, f32)]| {
+        let points = points
+            .iter()
+            .map(|&(x, y)| center + Vec2::new(x, y))
+            .collect();
+        painter.add(egui::Shape::line(points, stroke));
+    };
+    let frame = |size: Vec2| {
+        painter.rect_stroke(
+            egui::Rect::from_center_size(center, size),
+            CornerRadius::same(2),
+            stroke,
+            egui::StrokeKind::Middle,
+        );
+    };
+    match icon {
+        ButtonIcon::Picture => {
+            frame(Vec2::new(14.0, 11.0));
+            line(&[
+                (-5.0, 3.0),
+                (-1.5, -0.5),
+                (1.0, 2.0),
+                (2.5, 0.5),
+                (5.0, 3.0),
+            ]);
+            painter.circle_filled(center + Vec2::new(2.8, -2.0), 1.3, palette.secondary);
+        }
+        ButtonIcon::Text => {
+            line(&[(-6.0, -4.0), (6.0, -4.0)]);
+            line(&[(-6.0, 0.0), (6.0, 0.0)]);
+            line(&[(-6.0, 4.0), (2.0, 4.0)]);
+        }
+        ButtonIcon::Original => {
+            frame(Vec2::new(14.0, 12.0));
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    center + Vec2::new(-7.0, -6.0),
+                    center + Vec2::new(7.0, -2.0),
+                ),
+                CornerRadius::same(2),
+                palette.secondary,
+            );
+            line(&[(-4.0, 1.0), (4.0, 1.0)]);
+            line(&[(-4.0, 3.5), (1.0, 3.5)]);
+        }
+    }
+
+    let words_left = rect.left() + padding + icon_width + gap;
+    let words_width = words.size().x;
+    painter.galley(
+        Pos2::new(words_left, rect.center().y - words.size().y / 2.0),
+        words,
+        palette.text,
+    );
+    if let Some(cap) = cap {
+        let cap_rect = egui::Rect::from_min_size(
+            Pos2::new(words_left + words_width + gap, rect.center().y - 10.0),
+            Vec2::new(cap_width, 20.0),
+        );
+        painter.rect_stroke(
+            cap_rect,
+            CornerRadius::same(5),
+            Stroke::new(1.0, palette.dim),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley(cap_rect.center() - cap.size() / 2.0, cap, palette.secondary);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn sender_label(message: &Message, own_address: &str) -> String {
