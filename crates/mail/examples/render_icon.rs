@@ -1,5 +1,5 @@
-//! Draws Mail's app icon: a charcoal tile with an envelope and a blue
-//! unread dot, in the window's own colours.
+//! Draws Mail's app icon: a charcoal tile with an envelope, in the
+//! window's own colours. No unread dot, so it never looks like new mail.
 //!
 //!     cargo run -p mail --example render_icon -- packaging/macos/icon-1024.png
 //!
@@ -11,7 +11,6 @@ use image::{Rgba, RgbaImage};
 const SIZE: u32 = 1024;
 const TILE: [u8; 3] = [0x1e, 0x21, 0x24];
 const PAPER: [u8; 3] = [0xec, 0xee, 0xf0];
-const ACCENT: [u8; 3] = [0x8a, 0xb4, 0xf8];
 
 fn main() {
     let path = std::env::args()
@@ -36,21 +35,15 @@ fn shade(p: (f32, f32)) -> Rgba<u8> {
     }
     let mut colour = TILE.map(f32::from);
 
-    // The envelope: an outlined body and the flap's V.
+    // The envelope, centred on the tile: an outlined body and the flap's V.
     let stroke = 34.0;
-    let body = rounded_rect(p, (500.0, 545.0), (250.0, 180.0), 42.0);
+    let body = rounded_rect(p, (512.0, 512.0), (250.0, 180.0), 42.0);
     let outline = coverage(body.abs() - stroke / 2.0);
-    let flap_left = segment(p, (276.0, 395.0), (500.0, 560.0));
-    let flap_right = segment(p, (724.0, 395.0), (500.0, 560.0));
-    let flap = coverage(flap_left.min(flap_right) - stroke / 2.0) * coverage(body + stroke / 2.0);
+    let flap_left = segment(p, (288.0, 362.0), (512.0, 527.0));
+    let flap_right = segment(p, (736.0, 362.0), (512.0, 527.0));
+    // Clipped at the outline's outer edge, so the two overlap without a seam.
+    let flap = coverage(flap_left.min(flap_right) - stroke / 2.0) * coverage(body - stroke / 2.0);
     blend(&mut colour, PAPER, outline.max(flap));
-
-    // The unread dot, cut out of the envelope by a ring of tile colour.
-    let centre = (742.0, 372.0);
-    let gap = coverage(circle(p, centre, 112.0));
-    blend(&mut colour, TILE, gap);
-    let dot = coverage(circle(p, centre, 82.0));
-    blend(&mut colour, ACCENT, dot);
 
     let [r, g, b] = colour.map(|channel| channel.round() as u8);
     Rgba([r, g, b, (tile * 255.0).round() as u8])
@@ -72,10 +65,6 @@ fn rounded_rect(p: (f32, f32), centre: (f32, f32), half: (f32, f32), radius: f32
     let qy = (p.1 - centre.1).abs() - half.1 + radius;
     let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
     outside + qx.max(qy).min(0.0) - radius
-}
-
-fn circle(p: (f32, f32), centre: (f32, f32), radius: f32) -> f32 {
-    ((p.0 - centre.0).powi(2) + (p.1 - centre.1).powi(2)).sqrt() - radius
 }
 
 fn segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
