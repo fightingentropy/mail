@@ -30,9 +30,9 @@ use crate::{
 pub struct SyncOptions {
     /// How far back the first sync reaches.
     pub days: u32,
-    /// Parallel message downloads. The Gmail client paces requests to the
-    /// quota (about 1.6 full messages a second); a few workers keep that pace
-    /// despite network latency, and more help if the quota is raised.
+    /// Parallel message downloads. The Gmail client lets a minute's quota
+    /// (about 95 full messages) go at once, and another each minute after;
+    /// a few workers fetch each burst in a second or two.
     pub workers: usize,
     /// A full pass with more new messages than this stores headers first
     /// (20 quota units each), so the mailbox is usable three times sooner;

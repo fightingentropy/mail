@@ -1,6 +1,7 @@
 //! [`GmailApi`] over HTTPS, with token refresh, request pacing and retries.
 
 use std::{
+    collections::VecDeque,
     sync::Mutex,
     thread,
     time::{Duration, Instant},
@@ -27,10 +28,12 @@ const USERINFO: &str = "https://www.googleapis.com/oauth2/v3/userinfo";
 const PHOTO_HOST: &str = "https://lh3.googleusercontent.com/";
 const MAX_ATTEMPTS: u32 = 8;
 
-/// Gmail allows 6,000 quota units per user per minute. Spacing requests
-/// evenly at 95 units a second stays just under it, so Gmail rarely has to
-/// refuse one.
-const UNITS_PER_SECOND: f64 = 95.0;
+/// Gmail allows 6,000 quota units per user per minute. Mail spends at most
+/// 5,700 in any 61 seconds: the margin covers requests that reach Google a
+/// little later than they left, and the window's other Gmail clients
+/// (attachments, drafts), which keep budgets of their own.
+const QUOTA_UNITS: u32 = 5_700;
+const QUOTA_WINDOW: Duration = Duration::from_secs(61);
 
 /// What each call costs in quota units, from Gmail's usage limits page (costs
 /// changed on 1 May 2026). A full message is by far the most expensive: the
@@ -68,7 +71,7 @@ impl GmailClient {
             oauth,
             refresh_token,
             access: Mutex::new(access),
-            pacer: Pacer::new(UNITS_PER_SECOND),
+            pacer: Pacer::new(QUOTA_UNITS, QUOTA_WINDOW),
         }
     }
 
@@ -474,37 +477,102 @@ struct DraftRef {
     id: String,
 }
 
-/// Spreads requests from all workers evenly over time, so a burst never
-/// trips Gmail's per-user quota.
+/// Keeps every worker's requests within Gmail's per-user quota. A request
+/// goes at once while the last window's spending leaves room for it, so a
+/// catch-up of up to a window's budget (about 95 full messages) runs at
+/// network speed. A longer sync waits for the oldest requests to leave the
+/// window, so it goes in bursts a window apart: the most the quota allows.
 struct Pacer {
-    units_per_second: f64,
-    next: Mutex<Instant>,
+    budget: u32,
+    window: Duration,
+    spent: Mutex<Spent>,
 }
 
 impl Pacer {
-    fn new(units_per_second: f64) -> Self {
+    fn new(budget: u32, window: Duration) -> Self {
         Self {
-            units_per_second,
-            next: Mutex::new(Instant::now()),
+            budget,
+            window,
+            spent: Mutex::new(Spent::default()),
         }
     }
 
-    /// Waits for this request's turn. Each request books the slot after it in
-    /// proportion to its cost.
+    /// Waits for this request's turn.
     fn wait(&self, units: u32) {
-        let start = {
-            let mut next = self.next.lock().unwrap();
-            let start = (*next).max(Instant::now());
-            *next = start + Duration::from_secs_f64(f64::from(units) / self.units_per_second);
-            start
-        };
+        let start =
+            self.spent
+                .lock()
+                .unwrap()
+                .book(Instant::now(), units, self.budget, self.window);
         thread::sleep(start.saturating_duration_since(Instant::now()));
     }
 
-    /// Pushes every worker's next request back by at least `delay`.
+    /// After Gmail refused a request: pushes every worker's next request back
+    /// by at least `delay`, then keeps them to the steady pace, since
+    /// something else may be spending this account's quota too.
     fn hold(&self, delay: Duration) {
-        let mut next = self.next.lock().unwrap();
-        *next = (*next).max(Instant::now() + delay);
+        self.spent.lock().unwrap().hold(Instant::now() + delay);
+    }
+}
+
+/// What the pacer has booked: requests still inside the window, and when
+/// the next may go.
+#[derive(Default)]
+struct Spent {
+    /// When each request in the window started and what it cost, oldest
+    /// first. Starts never go backwards, so this stays in order.
+    booked: VecDeque<(Instant, u32)>,
+    /// The sum of `booked`.
+    total: u32,
+    /// After Gmail refused a request: the earliest the next may go, keeping
+    /// to the budget's average rate. Cleared once requests stop queuing.
+    steady: Option<Instant>,
+}
+
+impl Spent {
+    /// No request goes before `until`, and the ones after keep a steady pace.
+    fn hold(&mut self, until: Instant) {
+        self.steady = Some(self.steady.map_or(until, |next| next.max(until)));
+    }
+
+    /// Books a request of `units` asked for at `now` and returns when it may
+    /// start. Within any `window`, the requests booked never cost more than
+    /// `budget`.
+    fn book(&mut self, now: Instant, units: u32, budget: u32, window: Duration) -> Instant {
+        // A request dearer than the whole budget goes once the window is empty.
+        let units = units.min(budget);
+        let mut start = now;
+        if let Some(&(last, _)) = self.booked.back() {
+            start = start.max(last);
+        }
+        match self.steady {
+            Some(next) if next > now => start = start.max(next),
+            // Caught up with the pace: requests no longer queue, so a later
+            // burst may go at once again.
+            _ => self.steady = None,
+        }
+        loop {
+            // Requests that left the window before `start` no longer count;
+            // later requests start later still, so they never will again.
+            while let Some(&(at, cost)) = self.booked.front()
+                && at + window <= start
+            {
+                self.booked.pop_front();
+                self.total -= cost;
+            }
+            if self.total + units <= budget {
+                break;
+            }
+            // Wait for the oldest request to leave the window.
+            start = self.booked.front().expect("over budget, so not empty").0 + window;
+        }
+        if self.steady.is_some() {
+            let gap = window.mul_f64(f64::from(units) / f64::from(budget));
+            self.steady = Some(start + gap);
+        }
+        self.booked.push_back((start, units));
+        self.total += units;
+        start
     }
 }
 
@@ -581,20 +649,86 @@ mod tests {
         assert!(!should_retry(400, ""));
     }
 
+    const WINDOW: Duration = Duration::from_secs(60);
+
+    /// Books `count` requests of `units`, all asked for at `now`, as busy
+    /// workers do, and returns their starts.
+    fn book_all(spent: &mut Spent, now: Instant, count: usize, units: u32) -> Vec<Instant> {
+        (0..count)
+            .map(|_| spent.book(now, units, 6_000, WINDOW))
+            .collect()
+    }
+
     #[test]
-    fn pacer_spreads_requests_by_cost() {
-        let pacer = Pacer::new(1_000.0);
-        let started = Instant::now();
-        for _ in 0..11 {
-            pacer.wait(10);
+    fn a_small_sync_goes_at_once() {
+        let now = Instant::now();
+        let starts = book_all(&mut Spent::default(), now, 100, 60);
+        assert!(starts.iter().all(|start| *start == now));
+    }
+
+    #[test]
+    fn a_full_window_waits_for_the_oldest_to_leave() {
+        let now = Instant::now();
+        let starts = book_all(&mut Spent::default(), now, 201, 60);
+        // A hundred fill the window; the next hundred go as they leave it.
+        assert!(starts[..100].iter().all(|start| *start == now));
+        assert!(starts[100..200].iter().all(|start| *start == now + WINDOW));
+        assert_eq!(starts[200], now + WINDOW * 2);
+    }
+
+    #[test]
+    fn no_window_spends_more_than_the_budget() {
+        let now = Instant::now();
+        let mut spent = Spent::default();
+        // Mixed costs, as when sync downloads while labels are read.
+        let costs: Vec<u32> = (0..600).map(|i| [60, 20, 5][i % 3]).collect();
+        let starts: Vec<Instant> = costs
+            .iter()
+            .enumerate()
+            .map(|(i, units)| {
+                // Some arrive late, as workers finish at different times.
+                let asked = now + Duration::from_millis(37 * i as u64);
+                spent.book(asked, *units, 6_000, WINDOW)
+            })
+            .collect();
+        for (i, start) in starts.iter().enumerate() {
+            let in_window: u32 = starts
+                .iter()
+                .zip(&costs)
+                .filter(|(other, _)| **other <= *start && **other + WINDOW > *start)
+                .map(|(_, units)| units)
+                .sum();
+            assert!(in_window <= 6_000, "request {i}: {in_window} units");
         }
-        // Ten gaps of 10 units at 1,000 units a second.
-        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(starts.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn a_burst_is_allowed_again_after_a_quiet_spell() {
+        let now = Instant::now();
+        let mut spent = Spent::default();
+        book_all(&mut spent, now, 150, 60);
+        // The long sync has finished; the next sync, minutes later, has the
+        // whole window again.
+        let later = now + Duration::from_secs(300);
+        let starts = book_all(&mut spent, later, 100, 60);
+        assert!(starts.iter().all(|start| *start == later));
+    }
+
+    #[test]
+    fn after_a_refusal_requests_wait_then_keep_a_steady_pace() {
+        let now = Instant::now();
+        let mut spent = Spent::default();
+        let until = now + Duration::from_secs(2);
+        spent.hold(until);
+        let starts = book_all(&mut spent, now, 3, 60);
+        let gap = Duration::from_millis(600);
+        assert_eq!(starts, [until, until + gap, until + gap * 2]);
     }
 
     #[test]
     fn hold_delays_the_next_request() {
-        let pacer = Pacer::new(1_000_000.0);
+        let pacer = Pacer::new(6_000, WINDOW);
         pacer.hold(Duration::from_millis(50));
         let started = Instant::now();
         pacer.wait(1);

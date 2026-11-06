@@ -6,7 +6,7 @@ use std::{
     io::{IsTerminal, Write},
     path::Path,
     process,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -501,10 +501,11 @@ fn shown_labels(label_ids: &[String], names: &HashMap<String, String>) -> String
     }
 }
 
-/// `, about 4 min left`, once enough messages have arrived to estimate. Gmail's
-/// quota sets the pace, so the rate is steady.
+/// `, about 4 min left`, once enough messages have arrived to estimate. Gmail
+/// messages arrive in bursts a minute apart, so the rate means little before
+/// the first minute is over, and is rough after it.
 fn time_left(since: Instant, done: usize, total: usize) -> String {
-    if done < 10 || done >= total {
+    if since.elapsed() < Duration::from_secs(60) || done < 10 || done >= total {
         return String::new();
     }
     let per_message = since.elapsed().as_secs_f64() / done as f64;

@@ -237,10 +237,16 @@ Choices:
 - **Rate limits:** Gmail allows 6,000 quota units per user per minute. Since
   1 May 2026 a `format=full` message costs 60 units, a list 5, history 2. The
   first live sync, with 8 unpaced workers, had 84% of its fetches refused.
-  Mail now books every request through one shared pacer at 95 units a
-  second, about 1.6 full messages a second, so Gmail rarely refuses one. On
-  429, 5xx or a quota 403, all workers pause together, backing off from 2
-  seconds up to a minute.
+  Mail books every request through one shared pacer that spends at most
+  5,700 units in any 61 seconds; the margin covers requests that reach
+  Google a little late. A request goes at once while that window has room,
+  so a catch-up of up to about 95 full messages runs at network speed: 22
+  messages took 1.6 s, down from 13.7 s when the pacer spaced requests
+  evenly at 95 units a second. A longer sync goes in bursts a minute apart,
+  the most the quota allows: 130 messages took 63 s instead of about 82 s.
+  On 429, 5xx or a quota 403, all workers pause together, backing off from
+  2 seconds up to a minute, then keep to an even pace until requests stop
+  queuing, since something else may be spending the quota too.
 - **Local changes first.** Each sync sends queued triage before it pulls,
   and re-applies whatever was queued while it ran.
 - **No background process.** Sync runs when you run `mail sync`, and while

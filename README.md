@@ -193,7 +193,8 @@ mail (CLI, agent CLI, window)  →  mail-core: auth · gmail · sync · store
   password kept in the Keychain. It answers the same calls as the Gmail
   client, so sync, search and the window treat both alike.
 - **Sync.** The first run downloads the last 90 days, paced to Gmail's quota
-  (about 100 full messages a minute). Past 300 messages it stores headers
+  (about 100 full messages a minute; a smaller catch-up goes at network
+  speed). Past 300 messages it stores headers
   first, three times faster, so the mailbox is usable sooner, then fills in
   bodies newest first. After that, Gmail's History API supplies exact
   changes in a fraction of a second.

@@ -96,8 +96,8 @@ impl Downloader {
 
 fn run(paths: Paths, jobs: Receiver<Job>, events: Sender<Event>, wake: impl Fn()) {
     // A Gmail client of its own: the sync thread's may be busy with a long
-    // sync. Each paces itself; an attachment costs 20 quota units, a third
-    // of a message.
+    // sync. Each keeps its own quota budget; an attachment costs 20 quota
+    // units, a third of a message.
     let mut clients: HashMap<String, accounts::Client> = HashMap::new();
     for job in jobs {
         let event = match carry_out(&paths, &mut clients, &job) {
