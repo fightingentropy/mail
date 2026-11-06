@@ -186,7 +186,7 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
         shortcuts::help_overlay(ui.ctx(), &screen.keys.keymap, &mut actions);
     }
     if let Some(settings) = &mut screen.settings {
-        let remote_images = screen.preferences.remote_images;
+        let before = screen.preferences.clone();
         let open = shortcuts::settings_window(
             ui.ctx(),
             settings,
@@ -195,8 +195,14 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
             &mut screen.preferences,
             &screen.preferences_path,
         );
-        if screen.preferences.remote_images != remote_images {
-            actions.push(Action::SetRemoteImages(screen.preferences.remote_images));
+        let after = &screen.preferences;
+        if after.show_original != before.show_original {
+            // Text it is, whatever the setting, where originals can't show.
+            let show = after.show_original && screen.original_available;
+            actions.push(Action::SetShowOriginal(show));
+        }
+        if after.remote_images != before.remote_images {
+            actions.push(Action::SetRemoteImages(after.remote_images));
         }
         if !open {
             screen.settings = None;
@@ -1201,13 +1207,10 @@ fn original_reader(
         && !message.from_addr.eq_ignore_ascii_case(own_address))
     .then(|| format!("<{}>", message.from_addr));
     message_header(ui, message, own_address, address.as_deref());
-    // The buttons share the "to" line, on the right, so the page starts higher.
-    let toggle = screen.keys.keymap.hint(Bindable::ToggleOriginal);
+    // Load images shares the "to" line, on the right, so the page starts
+    // higher. The text view is a key press away, so it needs no button.
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if pill_button(ui, ButtonIcon::Text, "Show as text", &toggle).clicked() {
-                actions.push(Action::ToggleOriginal);
-            }
             if !original.images
                 && pill_button(ui, ButtonIcon::Picture, "Load images", "")
                     .on_hover_text(
@@ -1266,8 +1269,6 @@ fn original_reader(
 enum ButtonIcon {
     /// A framed picture with a hill and a sun.
     Picture,
-    /// Lines of text.
-    Text,
     /// A page with a banner across its top, as designed mail has.
     Original,
 }
@@ -1333,11 +1334,6 @@ fn pill_button(ui: &mut egui::Ui, icon: ButtonIcon, text: &str, key: &str) -> eg
                 (5.0, 3.0),
             ]);
             painter.circle_filled(center + Vec2::new(2.8, -2.0), 1.3, palette.secondary);
-        }
-        ButtonIcon::Text => {
-            line(&[(-6.0, -4.0), (6.0, -4.0)]);
-            line(&[(-6.0, 0.0), (6.0, 0.0)]);
-            line(&[(-6.0, 4.0), (2.0, 4.0)]);
         }
         ButtonIcon::Original => {
             frame(Vec2::new(14.0, 12.0));

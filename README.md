@@ -139,9 +139,9 @@ button instead. Pictures sent inside the email itself, such as a receipt's
 logo, always show: they come from Gmail, not the sender, so they give
 nothing away. Mail reads them the first time you open the email and
 keeps them. Files sent with the email, such as a PDF ticket, are listed above
-it; as in Gmail, the pictures it shows aren't. `v` (or **Show as text**)
-switches to the text reader, which lists every attachment, pictures too.
-Conversations read as text.
+it; as in Gmail, the pictures it shows aren't. `v` switches to the text
+reader, which lists every attachment, pictures too; Settings can make text
+the default. Conversations read as text.
 
 The text reader shows mail as plain text. Web and email links are in blue:
 hover one to see its full address, click to open it. Newsletters often send a

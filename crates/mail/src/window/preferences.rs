@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    /// An email with HTML shows as it was designed, rather than as text.
+    pub show_original: bool,
     /// An email's original loads its remote images as it opens. Loading them
     /// tells the sender you opened it; when this is off, each email has a
     /// "Load images" button instead.
@@ -20,6 +22,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            show_original: true,
             remote_images: true,
         }
     }
@@ -53,12 +56,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_images_load_unless_turned_off() {
+    fn originals_and_their_images_show_unless_turned_off() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("settings.json");
-        assert!(Preferences::load(&path).remote_images);
+        let defaults = Preferences::load(&path);
+        assert!(defaults.show_original);
+        assert!(defaults.remote_images);
 
         let off = Preferences {
+            show_original: false,
             remote_images: false,
         };
         off.save(&path).unwrap();

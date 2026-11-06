@@ -812,3 +812,15 @@ fn remote_images_load_as_an_email_opens_unless_turned_off() {
     select(&mut model, "Your receipt");
     assert!(model.showing_original().unwrap().images);
 }
+
+#[test]
+fn settings_can_make_emails_read_as_text() {
+    let (mut model, _folder) = model();
+    open_receipt(&mut model);
+    assert!(model.showing_original().is_some());
+    model.apply(Action::SetShowOriginal(false)).unwrap();
+    assert!(model.showing_original().is_none());
+    // v still shows this one as designed.
+    model.apply(Action::ToggleOriginal).unwrap();
+    assert!(model.showing_original().is_some());
+}

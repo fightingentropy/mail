@@ -94,6 +94,8 @@ pub enum Action {
     /// Whether originals load their remote images as they open, from
     /// Settings.
     SetRemoteImages(bool),
+    /// Whether emails show as designed or as text, from Settings.
+    SetShowOriginal(bool),
     /// Shows one account's mail, or every account's with `None`.
     SetScope(Option<i64>),
     /// Starts Google sign-in for another account.
@@ -712,6 +714,10 @@ impl Model {
                 if let Some(original) = self.open.as_mut().and_then(|open| open.original.as_mut()) {
                     original.images = true;
                 }
+            }
+            Action::SetShowOriginal(show) => {
+                self.show_original = show;
+                self.request_inline_images();
             }
             Action::SetRemoteImages(load) => {
                 self.remote_images = load;

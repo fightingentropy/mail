@@ -146,14 +146,29 @@ pub fn settings_window(
             );
             ui.add_space(14.0);
             group_heading(ui, "Reading");
-            let changed = setting_row(
+            let key = keymap.hint(Bindable::ToggleOriginal);
+            let switches = if key.is_empty() {
+                String::new()
+            } else {
+                format!(" Press {key} to switch between the two as you read.")
+            };
+            let designed = setting_row(
+                ui,
+                "Show emails as they were designed",
+                &format!("When this is off, they read as plain text.{switches}"),
+                &mut preferences.show_original,
+            );
+            ui.add_space(10.0);
+            let images = setting_row(
                 ui,
                 "Load remote images in emails",
                 "Loading them tells the sender you opened the email. \
                  When this is off, each email has a Load images button.",
                 &mut preferences.remote_images,
             );
-            if changed && let Err(error) = preferences.save(preferences_path) {
+            if (designed || images)
+                && let Err(error) = preferences.save(preferences_path)
+            {
                 settings.notice = Some(format!("Couldn't save settings: {error:#}"));
             }
             ui.add_space(16.0);
@@ -164,7 +179,7 @@ pub fn settings_window(
                     .color(palette.dim),
             );
             ui.add_space(10.0);
-            let height = (ctx.content_rect().height() - 380.0).max(220.0);
+            let height = (ctx.content_rect().height() - 440.0).max(220.0);
             ScrollArea::vertical()
                 .max_height(height)
                 .auto_shrink([false, true])

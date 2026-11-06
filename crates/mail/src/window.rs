@@ -74,8 +74,8 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
     let mut model = Model::new(store)?;
     // A screenshot captures what egui draws, and WebKit draws apart from it.
     let originals = options.screenshot.is_none();
-    model.show_original = originals;
     let preferences = Preferences::load(&Preferences::path(&paths));
+    model.show_original = originals && preferences.show_original;
     model.remote_images = preferences.remote_images;
 
     let native = eframe::NativeOptions {
