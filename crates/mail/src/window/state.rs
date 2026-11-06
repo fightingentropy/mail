@@ -91,6 +91,9 @@ pub enum Action {
     ToggleOriginal,
     /// Lets the original fetch its remote images.
     LoadImages,
+    /// Whether originals load their remote images as they open, from
+    /// Settings.
+    SetRemoteImages(bool),
     /// Shows one account's mail, or every account's with `None`.
     SetScope(Option<i64>),
     /// Starts Google sign-in for another account.
@@ -237,6 +240,9 @@ pub struct Model {
     pub view: View,
     /// Show a message's original layout when it has one, rather than text.
     pub show_original: bool,
+    /// Originals load their remote images as they open. See
+    /// [`super::preferences::Preferences::remote_images`].
+    pub remote_images: bool,
     /// The mailbox to return to when a search is cleared.
     mailbox: String,
     pub threads: Vec<ThreadSummary>,
@@ -274,6 +280,7 @@ impl Model {
             names: HashMap::new(),
             view: View::Mailbox("INBOX".into()),
             show_original: true,
+            remote_images: true,
             mailbox: "INBOX".into(),
             threads: Vec::new(),
             selected: 0,
@@ -706,6 +713,13 @@ impl Model {
                     original.images = true;
                 }
             }
+            Action::SetRemoteImages(load) => {
+                self.remote_images = load;
+                // The email on screen follows at once.
+                if let Some(original) = self.open.as_mut().and_then(|open| open.original.as_mut()) {
+                    original.images = load;
+                }
+            }
             Action::InlineImagesArrived {
                 account_id,
                 message_id,
@@ -1100,7 +1114,7 @@ impl Model {
         Ok(Some(OriginalHtml {
             message_id: message_id.to_owned(),
             html: inline::embed(&html, &images).into_owned(),
-            images: false,
+            images: self.remote_images,
             inline: images.len(),
             missing,
         }))

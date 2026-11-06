@@ -13,6 +13,7 @@ mod icloud_form;
 mod keys;
 mod links;
 mod original;
+mod preferences;
 mod script;
 mod shortcuts;
 mod state;
@@ -37,6 +38,7 @@ use background::{Event, Syncer};
 use downloads::Downloader;
 use drafts::Finished;
 use original::{Original, Page};
+use preferences::Preferences;
 use state::{Action, Effect, Model};
 use view::{Screen, SyncStatus};
 
@@ -73,6 +75,8 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
     // A screenshot captures what egui draws, and WebKit draws apart from it.
     let originals = options.screenshot.is_none();
     model.show_original = originals;
+    let preferences = Preferences::load(&Preferences::path(&paths));
+    model.remote_images = preferences.remote_images;
 
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -116,7 +120,7 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
             } else {
                 SyncStatus::Working("Syncing…".into())
             };
-            let mut screen = Screen::new(status, paths.clone());
+            let mut screen = Screen::new(status, paths.clone(), preferences);
             screen.original_available = originals;
             Ok(Box::new(Shell {
                 model,

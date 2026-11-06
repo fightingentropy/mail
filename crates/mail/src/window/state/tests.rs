@@ -782,3 +782,33 @@ fn pictures_are_only_asked_for_while_the_original_shows() {
     model.apply(Action::ToggleOriginal).unwrap();
     assert_eq!(model.effects.len(), 1);
 }
+
+#[test]
+fn remote_images_load_as_an_email_opens_unless_turned_off() {
+    let (mut model, _folder) = model();
+    open_receipt(&mut model);
+    assert!(model.showing_original().unwrap().images);
+
+    // Turned off in Settings: the open email follows at once.
+    model.apply(Action::SetRemoteImages(false)).unwrap();
+    assert!(!model.showing_original().unwrap().images);
+
+    // The next email waits for "Load images".
+    select(
+        &mut model,
+        "This week: async traits, SQLite tips and egui 0.36",
+    );
+    select(&mut model, "Your receipt");
+    assert!(!model.showing_original().unwrap().images);
+    model.apply(Action::LoadImages).unwrap();
+    assert!(model.showing_original().unwrap().images);
+
+    // Turned back on: emails load them as they open again.
+    model.apply(Action::SetRemoteImages(true)).unwrap();
+    select(
+        &mut model,
+        "This week: async traits, SQLite tips and egui 0.36",
+    );
+    select(&mut model, "Your receipt");
+    assert!(model.showing_original().unwrap().images);
+}

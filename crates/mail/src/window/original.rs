@@ -2,8 +2,9 @@
 //! the way Gmail shows it. Mail stays in charge of it:
 //!
 //! - A content policy blocks scripts, frames, forms, fonts and anything
-//!   fetched from the internet. Remote images, which tell the sender you
-//!   opened the message, load only after you choose "Load images".
+//!   else fetched from the internet. Remote images load as the message
+//!   opens, as in Gmail. They tell the sender you opened it, so Settings can
+//!   turn them off; each message then waits for "Load images".
 //! - Every link click goes to Mail, which opens web and email links in your
 //!   browser; the view itself never navigates.
 //! - Keys pressed while the view has focus come back to the window, so the

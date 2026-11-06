@@ -1,5 +1,5 @@
-//! The shortcuts overlay, and Settings, where any shortcut can be changed by
-//! pressing the keys you want.
+//! The shortcuts overlay, and Settings: whether emails load their remote
+//! images, and any shortcut, changed by pressing the keys you want.
 
 use std::{path::Path, time::Duration};
 
@@ -10,6 +10,7 @@ use egui::{
 
 use super::{
     keys::{Bindable, Chord, Keymap, Press, Scope, Section, Shortcut},
+    preferences::Preferences,
     state::Action,
     theme,
     view::overlay_frame,
@@ -120,12 +121,15 @@ fn is_plain(chord: Chord) -> bool {
     }
 }
 
-/// Draws Settings. Returns false once it should close.
+/// Draws Settings. Changes save as they are made. Returns false once it
+/// should close.
 pub fn settings_window(
     ctx: &egui::Context,
     settings: &mut Settings,
     keymap: &mut Keymap,
     path: &Path,
+    preferences: &mut Preferences,
+    preferences_path: &Path,
 ) -> bool {
     let palette = theme::palette(ctx);
     let mut open = true;
@@ -136,15 +140,31 @@ pub fn settings_window(
             ui.label(RichText::new("Settings").font(theme::semibold(20.0)));
             ui.add_space(2.0);
             ui.label(
-                RichText::new(
-                    "Keyboard shortcuts. Click + and press the keys you want; \
-                     changes save as you go.",
-                )
-                .font(theme::regular(13.5))
-                .color(palette.dim),
+                RichText::new("Changes save as you go.")
+                    .font(theme::regular(13.5))
+                    .color(palette.dim),
+            );
+            ui.add_space(14.0);
+            group_heading(ui, "Reading");
+            let changed = setting_row(
+                ui,
+                "Load remote images in emails",
+                "Loading them tells the sender you opened the email. \
+                 When this is off, each email has a Load images button.",
+                &mut preferences.remote_images,
+            );
+            if changed && let Err(error) = preferences.save(preferences_path) {
+                settings.notice = Some(format!("Couldn't save settings: {error:#}"));
+            }
+            ui.add_space(16.0);
+            group_heading(ui, "Keyboard shortcuts");
+            ui.label(
+                RichText::new("Click + and press the keys you want.")
+                    .font(theme::regular(13.5))
+                    .color(palette.dim),
             );
             ui.add_space(10.0);
-            let height = (ctx.content_rect().height() - 260.0).max(220.0);
+            let height = (ctx.content_rect().height() - 380.0).max(220.0);
             ScrollArea::vertical()
                 .max_height(height)
                 .auto_shrink([false, true])
@@ -169,9 +189,8 @@ pub fn settings_window(
                 ui.add_space(6.0);
             }
             ui.horizontal(|ui| {
-                let reset = egui::Button::new(
-                    RichText::new("Reset to defaults").font(theme::regular(14.5)),
-                );
+                let reset =
+                    egui::Button::new(RichText::new("Reset shortcuts").font(theme::regular(14.5)));
                 if ui.add_enabled(!keymap.is_default(), reset).clicked() {
                     *keymap = Keymap::defaults();
                     settings.recording = None;
@@ -337,6 +356,57 @@ fn shortcut_list(ui: &mut egui::Ui, keymap: &Keymap, sections: &[Section]) {
             });
         ui.add_space(10.0);
     }
+}
+
+/// A choice that is on or off: its name and a switch, with what it means
+/// below. Returns true when it changed.
+fn setting_row(ui: &mut egui::Ui, title: &str, detail: &str, on: &mut bool) -> bool {
+    let palette = theme::palette(ui.ctx());
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).font(theme::regular(14.5)));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            changed = switch(ui, on, title).changed();
+        });
+    });
+    ui.label(
+        RichText::new(detail)
+            .font(theme::regular(13.0))
+            .color(palette.dim),
+    );
+    changed
+}
+
+/// A switch like macOS's: the accent colour with the knob on the right when
+/// on, grey with it on the left when off.
+fn switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
+    let palette = theme::palette(ui.ctx());
+    let (rect, mut response) = ui.allocate_exact_size(Vec2::new(36.0, 20.0), Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, label)
+    });
+    let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
+    let off = palette.dim.gamma_multiply(0.5);
+    let track = off.lerp_to_gamma(palette.accent, how_on);
+    let radius = rect.height() / 2.0;
+    ui.painter().rect_filled(rect, radius, track);
+    let knob = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+    ui.painter().circle_filled(
+        egui::pos2(knob, rect.center().y),
+        radius - 2.0,
+        Color32::WHITE,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A part of Settings, such as "Reading".
+fn group_heading(ui: &mut egui::Ui, title: &str) {
+    ui.label(RichText::new(title).font(theme::semibold(15.5)));
+    ui.add_space(4.0);
 }
 
 fn section_heading(ui: &mut egui::Ui, section: Section) {

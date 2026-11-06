@@ -334,7 +334,8 @@ Rules:
    placed as a child view over the reader below Mail's own header. Pages are
    served from a private `mail://` scheme so the content policy arrives as a
    response header (`default-src 'none'`, inline styles, `data:` images, and
-   remote images only after "Load images"); the scheme answers only the
+   remote images unless Settings turns them off, when each message waits
+   for "Load images"); the scheme answers only the
    page's own path. The navigation handler allows nothing but those pages
    and hands web and email links to the browser. An init script forwards
    key presses to the window over IPC, so shortcuts work while the page has
@@ -343,7 +344,8 @@ Rules:
    scheme. WebKit draws above the GL surface, so the view hides whenever an
    egui modal or popup is open, and screenshots (which capture only egui)
    use the text reader. Checked on a real newsletter: 18 images, none
-   fetched until allowed.
+   fetched until allowed. Remote images later became the default, as in
+   Gmail, with a Settings switch saved in `settings.json`.
 
    *Pictures sent inside a message* (added after): HTML can show a MIME part
    by `cid:` reference, as receipts and booking emails do for logos and
@@ -356,8 +358,8 @@ Rules:
    5 MB, are skipped without being downloaded. They are kept in
    `inline_images` (migration 6), are deleted with their message, and are
    swapped into the HTML as `data:` addresses, which the content policy
-   already allows. They load before "Load images" because they come from
-   Gmail and tell the sender nothing. A failed read is retried the next time
+   already allows. They load even with remote images off, because they
+   come from Gmail and tell the sender nothing. A failed read is retried the next time
    the message opens. Checked on six real messages (Booking.com, Everyman,
    Workday and others): 24 of 24 pictures found. The designed view lists
    the message's files above the page and, as in Gmail, leaves out such

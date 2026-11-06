@@ -18,6 +18,7 @@ use super::{
     icloud_form::{self, IcloudForm},
     keys::{Bindable, Command, Focus, Keymap, Keys, Press},
     links,
+    preferences::Preferences,
     shortcuts::{self, Settings},
     state::{Action, MAILBOXES, Model, OpenThread, OriginalHtml, SendSummary, View},
     theme::{self, Palette},
@@ -43,6 +44,9 @@ pub struct Screen {
     keys: Keys,
     /// Where Settings saves changed shortcuts.
     shortcuts_path: PathBuf,
+    /// Settings' other choices, and where they are saved.
+    preferences: Preferences,
+    preferences_path: PathBuf,
     settings: Option<Settings>,
     /// "Add iCloud account…" while it is open.
     pub icloud_form: Option<IcloudForm>,
@@ -69,11 +73,13 @@ pub struct Screen {
 }
 
 impl Screen {
-    pub fn new(status: SyncStatus, paths: Paths) -> Self {
+    pub fn new(status: SyncStatus, paths: Paths, preferences: Preferences) -> Self {
         let shortcuts_path = paths.root.join("shortcuts.json");
         Self {
             keys: Keys::new(Keymap::load(&shortcuts_path)),
             shortcuts_path,
+            preferences,
+            preferences_path: Preferences::path(&paths),
             settings: None,
             icloud_form: None,
             toast: Toast::default(),
@@ -180,8 +186,19 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
         shortcuts::help_overlay(ui.ctx(), &screen.keys.keymap, &mut actions);
     }
     if let Some(settings) = &mut screen.settings {
-        let keymap = &mut screen.keys.keymap;
-        if !shortcuts::settings_window(ui.ctx(), settings, keymap, &screen.shortcuts_path) {
+        let remote_images = screen.preferences.remote_images;
+        let open = shortcuts::settings_window(
+            ui.ctx(),
+            settings,
+            &mut screen.keys.keymap,
+            &screen.shortcuts_path,
+            &mut screen.preferences,
+            &screen.preferences_path,
+        );
+        if screen.preferences.remote_images != remote_images {
+            actions.push(Action::SetRemoteImages(screen.preferences.remote_images));
+        }
+        if !open {
             screen.settings = None;
         }
     }
@@ -1193,7 +1210,10 @@ fn original_reader(
             }
             if !original.images
                 && pill_button(ui, ButtonIcon::Picture, "Load images", "")
-                    .on_hover_text("Loading them tells the sender you opened this")
+                    .on_hover_text(
+                        "Loading them tells the sender you opened this. \
+                         Settings can load them for every email.",
+                    )
                     .clicked()
             {
                 actions.push(Action::LoadImages);

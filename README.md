@@ -132,11 +132,12 @@ it to Gmail, so it works offline too.
 
 A message on its own, such as a receipt or a newsletter, shows as it was
 designed, the way Gmail shows it, in macOS's own WebKit. Mail keeps control:
-scripts never run, links open in your browser, and remote images stay off
-until you click **Load images**, because loading them tells the sender you
-opened the message. Pictures sent inside the email itself, such as a
-receipt's logo, show straight away: they come from Gmail, not the sender, so
-they give nothing away. Mail reads them the first time you open the email and
+scripts never run, and links open in your browser. Remote images load as the
+email opens. Loading them tells the sender you opened the message, so you can
+turn them off in Settings (`⌘,`); each email then has a **Load images**
+button instead. Pictures sent inside the email itself, such as a receipt's
+logo, always show: they come from Gmail, not the sender, so they give
+nothing away. Mail reads them the first time you open the email and
 keeps them. Files sent with the email, such as a PDF ticket, are listed above
 it; as in Gmail, the pictures it shows aren't. `v` (or **Show as text**)
 switches to the text reader, which lists every attachment, pictures too.
