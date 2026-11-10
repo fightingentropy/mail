@@ -440,3 +440,27 @@ fn dates_are_written_as_mail_and_imap_want_them() {
         "Mon, 2 Nov 2026 09:05:07 +0000"
     );
 }
+
+#[test]
+fn changing_one_thread_keeps_the_index_for_the_others() {
+    let client = super::IcloudClient::new(
+        ME,
+        super::Login {
+            user: "ana".into(),
+            password: "fake".into(),
+        },
+    );
+    let mut index = mailbox();
+    index.add(at(INBOX, 1), &headers("<a@x>", ""), 1, ME);
+    index.add(at(INBOX, 2), &headers("<b@x>", ""), 2, ME);
+    let index = std::sync::Arc::new(index);
+    client.cache.lock().unwrap().index = Some(index.clone());
+
+    client.mark_changed(&index::key("<a@x>"));
+
+    // Reading the other thread needs no rescan (and so no connection).
+    let other = index::key("<b@x>");
+    let again = client.index_for(|_| Some(other.clone())).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&index, &again));
+    assert!(client.cache.lock().unwrap().index.is_some());
+}

@@ -17,7 +17,7 @@ mod tests;
 mod tls;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -86,6 +86,10 @@ pub struct IcloudClient {
 struct Cache {
     folders: Option<Vec<Folder>>,
     index: Option<Arc<Index>>,
+    /// Threads this client has changed since the index was read. Their
+    /// entries are out of date (moved copies have new UIDs); the rest of
+    /// the index is still right.
+    changed: HashSet<String>,
     /// How far back sync last asked for mail.
     days: Option<u32>,
     /// The last message read whole: attachments and inline pictures are
@@ -205,7 +209,41 @@ impl IcloudClient {
     }
 
     fn forget_index(&self) {
-        self.cache.lock().unwrap().index = None;
+        let mut cache = self.cache.lock().unwrap();
+        cache.index = None;
+        cache.changed.clear();
+    }
+
+    /// Like [`Self::index`], but read again first if the thread that
+    /// `thread_of` names from the cached index has changed since. Changing
+    /// one thread leaves the others' entries right, so filing many threads
+    /// in a row does not rescan the mailbox for each.
+    fn index_for(
+        &self,
+        thread_of: impl FnOnce(&Index) -> Option<String>,
+    ) -> anyhow::Result<Arc<Index>> {
+        {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(index) = cache.index.clone() {
+                match thread_of(&index) {
+                    Some(thread) if cache.changed.contains(&thread) => {
+                        cache.index = None;
+                        cache.changed.clear();
+                    }
+                    _ => return Ok(index),
+                }
+            }
+        }
+        self.index()
+    }
+
+    /// Notes that a thread is about to change, so its entries are not trusted.
+    fn mark_changed(&self, thread_id: &str) {
+        self.cache
+            .lock()
+            .unwrap()
+            .changed
+            .insert(thread_id.to_owned());
     }
 
     /// A whole message, or `None` if that copy is gone.
@@ -235,7 +273,7 @@ impl IcloudClient {
         thread_id: &str,
         plan: impl Fn(&Index, &Entry) -> Result<Vec<Step>, Refusal>,
     ) -> anyhow::Result<Outcome> {
-        let index = self.index()?;
+        let index = self.index_for(|_| Some(thread_id.to_owned()))?;
         let thread = index.thread(thread_id);
         if thread.is_empty() {
             return Ok(Outcome::Gone);
@@ -251,7 +289,7 @@ impl IcloudClient {
             return Ok(Outcome::Done);
         }
         // Even a change that stops halfway moves things.
-        self.forget_index();
+        self.mark_changed(thread_id);
         self.with(|connection| {
             for step in &steps {
                 connection.run(&index.folders, step)?;
@@ -262,7 +300,7 @@ impl IcloudClient {
     }
 
     fn message_for(&self, id: &str, whole: bool) -> anyhow::Result<Option<ApiMessage>> {
-        let index = self.index()?;
+        let index = self.index_for(|index| index.entries.get(id).map(|e| e.thread_id.clone()))?;
         let Some(entry) = index.entries.get(id) else {
             return Ok(None);
         };
@@ -349,6 +387,7 @@ impl GmailApi for IcloudClient {
             let mut cache = self.cache.lock().unwrap();
             cache.days = Some(days);
             cache.index = None;
+            cache.changed.clear();
             cache.folders = None;
         }
         let index = self.index()?;
@@ -376,7 +415,7 @@ impl GmailApi for IcloudClient {
     }
 
     fn message_labels(&self, id: &str) -> anyhow::Result<Option<Vec<String>>> {
-        let index = self.index()?;
+        let index = self.index_for(|index| index.entries.get(id).map(|e| e.thread_id.clone()))?;
         Ok(index.entries.get(id).map(|entry| index.labels(entry)))
     }
 
