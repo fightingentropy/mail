@@ -84,8 +84,36 @@ pub fn send(
         });
         let _ = done.send(match result {
             Ok(_) => Finished::Sent,
-            Err(error) => Finished::SendFailed(format!("Not sent: {error:#}")),
+            Err(error) => Finished::SendFailed(send_failure(&error)),
         });
         wake();
     });
+}
+
+/// Says "Not sent" only when that is certain. An error that says the request
+/// "may have gone through" is shown as it is, so you check Sent before retrying.
+fn send_failure(error: &anyhow::Error) -> String {
+    let text = format!("{error:#}");
+    if text.contains("may have gone through") || text.contains("may already have been sent") {
+        text
+    } else {
+        format!("Not sent: {text}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::send_failure;
+
+    #[test]
+    fn an_unclear_send_failure_is_not_called_not_sent() {
+        let unclear = anyhow::anyhow!("Gmail did not answer; the request may have gone through");
+        assert!(!send_failure(&unclear).starts_with("Not sent"));
+        let gone = anyhow::anyhow!("The draft is gone, so it may already have been sent.");
+        assert!(!send_failure(&gone).starts_with("Not sent"));
+        assert_eq!(
+            send_failure(&anyhow::anyhow!("offline")),
+            "Not sent: offline"
+        );
+    }
 }

@@ -246,6 +246,22 @@ fn sending_saves_first_then_sends_that_draft() {
 }
 
 #[test]
+fn a_retried_send_whose_draft_is_gone_does_not_send_a_second_copy() {
+    let gmail = FakeGmail::new(Vec::new());
+    let draft = Draft::reply(&original(), ME, false, "today");
+    let error = send(&gmail, ME, &draft, Some("draft-gone"), |_| {}).unwrap_err();
+    assert!(format!("{error:#}").contains("may already have been sent"));
+    assert!(
+        gmail
+            .calls()
+            .iter()
+            .all(|call| !call.starts_with("create_draft") && !call.starts_with("send_draft")),
+        "nothing is created or sent: {:?}",
+        gmail.calls()
+    );
+}
+
+#[test]
 fn sending_needs_a_recipient_and_valid_addresses() {
     let gmail = FakeGmail::new(Vec::new());
     let nobody = Draft {

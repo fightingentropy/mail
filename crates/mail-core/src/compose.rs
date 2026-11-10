@@ -175,6 +175,19 @@ pub fn save(
     draft: &Draft,
     existing: Option<&str>,
 ) -> anyhow::Result<String> {
+    save_as(api, from, draft, existing, false)
+}
+
+/// [`save`], optionally refusing to make a new draft when `existing` is gone.
+/// A send that is retried after an unclear failure must not do that: Gmail
+/// removes a draft when it sends it, so a missing one may mean it went out.
+fn save_as(
+    api: &dyn GmailApi,
+    from: &str,
+    draft: &Draft,
+    existing: Option<&str>,
+    for_send: bool,
+) -> anyhow::Result<String> {
     anyhow::ensure!(draft.body.len() <= MAX_BODY, "The message is too long.");
     let invalid = draft.invalid_addresses();
     anyhow::ensure!(
@@ -187,7 +200,11 @@ pub fn save(
     if let Some(id) = existing {
         match api.update_draft(id, &raw, thread_id)? {
             Outcome::Done => return Ok(id.to_owned()),
-            Outcome::Gone => {}
+            Outcome::Gone => anyhow::ensure!(
+                !for_send,
+                "The draft is gone from Drafts, so it may already have been sent. \
+                 Check Sent before sending again."
+            ),
             Outcome::Rejected(message) => anyhow::bail!("The draft was refused: {message}"),
         }
     }
@@ -208,7 +225,7 @@ pub fn send(
     saved: impl FnOnce(&str),
 ) -> anyhow::Result<String> {
     anyhow::ensure!(draft.has_recipients(), "Add a recipient first.");
-    let draft_id = save(api, from, draft, existing)?;
+    let draft_id = save_as(api, from, draft, existing, true)?;
     saved(&draft_id);
     api.send_draft(&draft_id)
 }
