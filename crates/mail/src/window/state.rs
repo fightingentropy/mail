@@ -424,6 +424,13 @@ impl Model {
                 self.names.insert(account.id, name);
             }
         }
+        self.reload_threads()
+    }
+
+    /// Lists the threads again for the current view and scope, leaving the
+    /// sidebar's labels and unread counts as they are. Enough when only the
+    /// view changed (Show, search), which happens on every keystroke.
+    fn reload_threads(&mut self) -> anyhow::Result<()> {
         let previous = self
             .selected_thread()
             .map(|t| (t.account_id, t.thread_id.clone()));
@@ -513,7 +520,7 @@ impl Model {
                 self.mailbox = mailbox.clone();
                 self.view = View::Mailbox(mailbox);
                 self.selected = 0;
-                self.reload()?;
+                self.reload_threads()?;
             }
             Action::Search(text) if text.trim().is_empty() => self.apply(Action::ClearSearch)?,
             // One letter would match most of the mailbox; wait for a second.
@@ -521,13 +528,13 @@ impl Model {
             Action::Search(text) => {
                 self.view = View::Search(text);
                 self.selected = 0;
-                self.reload()?;
+                self.reload_threads()?;
             }
             Action::ClearSearch => {
                 if matches!(self.view, View::Search(_)) {
                     self.view = View::Mailbox(self.mailbox.clone());
                     self.selected = 0;
-                    self.reload()?;
+                    self.reload_threads()?;
                 }
             }
             Action::OpenPicker => {

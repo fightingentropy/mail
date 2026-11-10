@@ -836,3 +836,15 @@ fn reply_and_new_message_keep_an_unsaved_compose() {
     assert_eq!(compose.to, "maya@fastmail.test");
     assert_eq!(compose.body, "7:30 works.");
 }
+
+#[test]
+fn searching_and_switching_mailbox_leave_the_sidebar_counts_alone() {
+    let (mut model, _folder) = model();
+    model.unread.clear();
+    model.apply(Action::Search("se".into())).unwrap();
+    model.apply(Action::Show("SENT".into())).unwrap();
+    model.apply(Action::ClearSearch).unwrap();
+    assert!(model.unread.is_empty(), "counts are not rescanned per view");
+    model.reload().unwrap();
+    assert!(!model.unread.is_empty(), "a full reload refreshes them");
+}

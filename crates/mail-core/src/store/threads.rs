@@ -97,9 +97,10 @@ impl Store {
     pub fn unread_counts(&self, account_id: i64) -> anyhow::Result<HashMap<String, usize>> {
         let mut statement = self.connection().prepare(
             "SELECT l.label_id, count(DISTINCT m.thread_id)
-             FROM messages m JOIN message_labels l ON l.message_id = m.id
-             WHERE m.account_id = ?1 AND EXISTS (
-                 SELECT 1 FROM message_labels u WHERE u.message_id = m.id AND u.label_id = 'UNREAD')
+             FROM message_labels u
+             JOIN messages m ON m.id = u.message_id
+             JOIN message_labels l ON l.message_id = m.id
+             WHERE u.label_id = 'UNREAD' AND m.account_id = ?1
              GROUP BY l.label_id",
         )?;
         let counts = statement
