@@ -864,3 +864,21 @@ fn a_held_key_does_not_repeat_sending_or_removing_mail() {
     assert!(!Action::Next.once_per_press());
     assert!(!Action::Previous.once_per_press());
 }
+
+/// Each helper keeps its own doc comment: one helper's text must not end up
+/// stacked on another, leaving the function it describes bare.
+#[test]
+fn set_from_keeps_its_own_doc_comment() {
+    let source = include_str!("../state.rs");
+    let lines: Vec<&str> = source.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("fn set_from("))
+        .unwrap();
+    let doc = lines[at - 1].trim_start();
+    assert!(doc.starts_with("///"), "set_from has no doc comment");
+    assert!(
+        lines[at - 3].contains("Writes the new message from another account"),
+        "set_from's doc comment is not its own"
+    );
+}
