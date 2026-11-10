@@ -59,10 +59,33 @@ fn deliver<S: Read + Write>(
     }
     dialogue.command("DATA", 354)?;
     dialogue.data(raw)?;
-    dialogue.expect(250)?;
+    // Once the message has gone, the server may queue it and then the final
+    // reply may be lost. Only an actual reply code is a refusal; anything
+    // else leaves it unknown, and the text says so, so you check Sent
+    // instead of sending a second copy.
+    if let Err(error) = dialogue.expect(250) {
+        if error.downcast_ref::<Refused>().is_some() {
+            return Err(error);
+        }
+        return Err(error.context(
+            "iCloud did not confirm the message after it was sent, so the request may have gone through",
+        ));
+    }
     let _ = dialogue.command("QUIT", 221);
     Ok(())
 }
+
+/// The server answered with a code other than the one expected.
+#[derive(Debug)]
+struct Refused(String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 struct Dialogue<S: Read + Write> {
     reader: BufReader<S>,
@@ -108,7 +131,7 @@ impl<S: Read + Write> Dialogue<S> {
                 if code == expected || (expected == 250 && code == 251) {
                     return Ok(());
                 }
-                bail!("{code} {}", text.trim());
+                return Err(Refused(format!("{code} {}", text.trim())).into());
             }
         }
     }
@@ -191,6 +214,41 @@ mod tests {
              RCPT TO:<ana@example.org>\r\nRCPT TO:<bo@example.net>\r\nDATA\r\n\
              Subject: Hi\r\n\r\n..hidden\r\nok\r\n.\r\nQUIT\r\n"
         );
+    }
+
+    #[test]
+    fn a_lost_final_reply_is_not_called_a_failure_to_send() {
+        // The connection ends after the message, with no reply to the dot.
+        let mut dialogue = server("250 hi\r\n235 ok\r\n250 ok\r\n250 ok\r\n354 go\r\n");
+        let error = deliver(
+            &mut dialogue,
+            "me@icloud.com",
+            "pass",
+            &["ana@example.org".into()],
+            b"Subject: Hi\r\n\r\nbody\r\n",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("may have gone through"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_after_the_message_is_a_plain_failure() {
+        let mut dialogue =
+            server("250 hi\r\n235 ok\r\n250 ok\r\n250 ok\r\n354 go\r\n554 5.7.1 spam\r\n");
+        let error = deliver(
+            &mut dialogue,
+            "me@icloud.com",
+            "pass",
+            &["ana@example.org".into()],
+            b"Subject: Hi\r\n\r\nbody\r\n",
+        )
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("554 5.7.1 spam"), "{text}");
+        assert!(!text.contains("may have gone through"), "{text}");
     }
 
     #[test]

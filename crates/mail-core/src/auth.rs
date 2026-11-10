@@ -467,7 +467,10 @@ mod tests {
             pages
         });
 
-        assert_eq!(wait_for_redirect(&listener, "s1", Duration::from_secs(30)).unwrap(), "4/0Ab");
+        assert_eq!(
+            wait_for_redirect(&listener, "s1", Duration::from_secs(30)).unwrap(),
+            "4/0Ab"
+        );
         let pages = browser.join().unwrap();
         assert!(pages[0].starts_with("HTTP/1.1 404"));
         assert!(pages[1].starts_with("HTTP/1.1 400"));
@@ -486,11 +489,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(2));
             }
             let mut stream = TcpStream::connect(address).unwrap();
-            write!(
-                stream,
-                "GET /?state=s1&code=ok HTTP/1.1\r\nHost: x\r\n\r\n"
-            )
-            .unwrap();
+            write!(stream, "GET /?state=s1&code=ok HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
         });
         assert_eq!(
             wait_for_redirect(&listener, "s1", Duration::from_secs(30)).unwrap(),
