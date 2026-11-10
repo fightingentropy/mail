@@ -18,6 +18,7 @@ mod script;
 mod shortcuts;
 mod state;
 mod theme;
+mod throttle;
 mod toast;
 mod view;
 
@@ -141,6 +142,7 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
                 screenshot: screenshot.map(|path| Screenshot { path, frames: 0 }),
                 script,
                 frames: 0,
+                reloads: throttle::ReloadThrottle::default(),
             }))
         }),
     )
@@ -179,6 +181,8 @@ struct Shell {
     /// Scripted key presses for demo screenshots, one step every few frames.
     script: std::collections::VecDeque<Vec<egui::Event>>,
     frames: u64,
+    /// Keeps sync progress from reloading the list too often.
+    reloads: throttle::ReloadThrottle,
 }
 
 struct Screenshot {
@@ -298,7 +302,7 @@ impl Shell {
                     self.screen.status = SyncStatus::Working(format!(
                         "Downloading message bodies {done} of {total}"
                     ));
-                    if done.is_multiple_of(50) {
+                    if done.is_multiple_of(50) && self.reloads.ready(Instant::now()) {
                         self.reload();
                     }
                 }
@@ -310,7 +314,7 @@ impl Shell {
                     self.screen.status =
                         SyncStatus::Working(format!("Downloading {done} of {total}"));
                     // Show mail as it arrives during a first sync.
-                    if done.is_multiple_of(50) {
+                    if done.is_multiple_of(50) && self.reloads.ready(Instant::now()) {
                         self.reload();
                     }
                 }
