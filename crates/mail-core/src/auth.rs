@@ -136,7 +136,7 @@ pub fn sign_in(
     );
     open_browser(&url)?;
 
-    let code = wait_for_redirect(&listener, &state)?;
+    let code = wait_for_redirect(&listener, &state, SIGN_IN_TIMEOUT)?;
     let response = http.post(TOKEN_URL).send_form([
         ("code", code.as_str()),
         ("client_id", &client.client_id),
@@ -214,53 +214,86 @@ fn read_token_response(
     serde_json::from_str(&body).context("Unexpected token response from Google")
 }
 
+/// How long Mail waits for the browser to come back before giving up.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
 /// Serves the loopback redirect until Google sends the browser back with a
-/// code for this sign-in.
-fn wait_for_redirect(listener: &TcpListener, state: &str) -> anyhow::Result<String> {
-    for stream in listener.incoming() {
-        let mut stream = stream?;
+/// code for this sign-in, or `timeout` passes.
+fn wait_for_redirect(
+    listener: &TcpListener,
+    state: &str,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    let deadline = Instant::now() + timeout;
+    // Poll instead of blocking in accept, so a closed browser tab cannot
+    // hold this thread and the port forever.
+    listener.set_nonblocking(true)?;
+    loop {
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    bail!("Timed out waiting for the browser to finish signing in. Try again.");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        };
+        // Some platforms hand back a nonblocking socket from a nonblocking
+        // listener; reads below rely on the timeout.
+        if stream.set_nonblocking(false).is_err()
+            || stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .is_err()
+        {
+            continue;
+        }
         // Browsers sometimes open a connection and never send on it; the
         // timeout moves on to the next one instead of waiting forever.
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         let Ok(request_line) = read_request(&stream) else {
             continue;
         };
 
+        // A stray connection (preconnect, favicon) may already be gone, so a
+        // failed reply to it must not end the sign-in.
         // "GET /?state=...&code=... HTTP/1.1"
         let target = request_line.split_whitespace().nth(1).unwrap_or_default();
         let Some(query) = target.strip_prefix("/?") else {
-            respond(&mut stream, "404 Not Found", "Not found.")?;
+            let _ = respond(&mut stream, "404 Not Found", "Not found.");
             continue;
         };
         let params = parse_query(query);
         if params.get("state").map(String::as_str) != Some(state) {
-            respond(
+            let _ = respond(
                 &mut stream,
                 "400 Bad Request",
                 "This sign-in link has expired.",
-            )?;
+            );
             continue;
         }
         if let Some(error) = params.get("error") {
-            respond(
+            let _ = respond(
                 &mut stream,
                 "200 OK",
                 "Sign-in was cancelled. You can close this tab.",
-            )?;
+            );
             bail!("Google sign-in was cancelled ({error})");
         }
         let Some(code) = params.get("code") else {
-            respond(&mut stream, "400 Bad Request", "Google sent no code.")?;
+            let _ = respond(&mut stream, "400 Bad Request", "Google sent no code.");
             continue;
         };
-        respond(
+        // The matching request has its code; a failed page write does not
+        // change that.
+        let _ = respond(
             &mut stream,
             "200 OK",
             "Mail is signed in. You can close this tab.",
-        )?;
+        );
         return Ok(code.clone());
     }
-    bail!("The sign-in listener closed")
 }
 
 /// Returns the request line, after reading the headers so the browser gets a
@@ -434,11 +467,45 @@ mod tests {
             pages
         });
 
-        assert_eq!(wait_for_redirect(&listener, "s1").unwrap(), "4/0Ab");
+        assert_eq!(wait_for_redirect(&listener, "s1", Duration::from_secs(30)).unwrap(), "4/0Ab");
         let pages = browser.join().unwrap();
         assert!(pages[0].starts_with("HTTP/1.1 404"));
         assert!(pages[1].starts_with("HTTP/1.1 400"));
         assert!(pages[2].contains("Mail is signed in"));
+    }
+
+    #[test]
+    fn loopback_survives_stray_connections_that_vanish() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let browser = std::thread::spawn(move || {
+            // Send a request and hang up without reading the reply.
+            for _ in 0..100 {
+                let mut stream = TcpStream::connect(address).unwrap();
+                let _ = write!(stream, "GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let mut stream = TcpStream::connect(address).unwrap();
+            write!(
+                stream,
+                "GET /?state=s1&code=ok HTTP/1.1\r\nHost: x\r\n\r\n"
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            wait_for_redirect(&listener, "s1", Duration::from_secs(30)).unwrap(),
+            "ok"
+        );
+        browser.join().unwrap();
+    }
+
+    #[test]
+    fn loopback_gives_up_after_the_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let started = Instant::now();
+        let error = wait_for_redirect(&listener, "s1", Duration::from_millis(200)).unwrap_err();
+        assert!(error.to_string().contains("Timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
