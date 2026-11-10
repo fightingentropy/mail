@@ -153,7 +153,7 @@ impl Message {
 
 /// Words in a body that link somewhere, as an HTML "Track your order"
 /// button does. Byte offsets into `body_text`; only web and email links.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct BodyLink {
     pub start: usize,
     pub end: usize,

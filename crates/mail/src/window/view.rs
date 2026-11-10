@@ -1488,8 +1488,8 @@ fn expanded_message(
 /// so a link opens only on a click, and hovering shows its full address.
 fn body(ui: &mut egui::Ui, text: &str, link_words: &[BodyLink]) -> Option<String> {
     let palette = theme::palette(ui.ctx());
-    let (text, found) = shown_text(text, link_words);
-    let text = text.as_str();
+    let shown = cached_shown_text(ui.ctx(), text, link_words);
+    let (text, found) = (shown.0.as_str(), &shown.1);
     let plain = TextFormat {
         font_id: theme::regular(17.0),
         line_height: Some(26.0),
@@ -1502,7 +1502,7 @@ fn body(ui: &mut egui::Ui, text: &str, link_words: &[BodyLink]) -> Option<String
     };
     let mut job = LayoutJob::default();
     let mut written = 0;
-    for (range, _) in &found {
+    for (range, _) in found {
         job.append(&text[written..range.start], 0.0, plain.clone());
         // A link over several lines, such as a whole job card, reads better
         // in the text color; hovering still underlines it.
@@ -1548,6 +1548,29 @@ fn body(ui: &mut egui::Ui, text: &str, link_words: &[BodyLink]) -> Option<String
 /// The body as the reader shows it, and each link's place in that text: the
 /// words that link (from the HTML) and the addresses written in the text,
 /// long ones shortened to their site.
+/// What `shown_text` makes of a body, kept while the body keeps being drawn,
+/// so a long message is not searched for links on every frame.
+type Shown = std::sync::Arc<(String, Vec<(Range<usize>, String)>)>;
+
+#[derive(Default)]
+struct ShownText;
+
+impl<'a> egui::cache::ComputerMut<(&'a str, &'a [BodyLink]), Shown> for ShownText {
+    fn compute(&mut self, (text, link_words): (&'a str, &'a [BodyLink])) -> Shown {
+        std::sync::Arc::new(shown_text(text, link_words))
+    }
+}
+
+fn cached_shown_text(ctx: &egui::Context, text: &str, link_words: &[BodyLink]) -> Shown {
+    ctx.memory_mut(|memory| {
+        memory
+            .caches
+            .cache::<egui::cache::FrameCache<Shown, ShownText>>()
+            .get((text, link_words))
+            .clone()
+    })
+}
+
 fn shown_text(text: &str, link_words: &[BodyLink]) -> (String, Vec<(Range<usize>, String)>) {
     // Linked words come first; an address inside them stays part of them.
     let mut found: Vec<(Range<usize>, String, bool)> = link_words
@@ -1591,33 +1614,31 @@ fn shown_text(text: &str, link_words: &[BodyLink]) -> (String, Vec<(Range<usize>
     (shown, placed)
 }
 
-/// Each character's glyph in a galley: its index and its box, relative to
-/// the galley, plus its row's baseline.
-fn glyphs(galley: &egui::Galley) -> Vec<(usize, egui::Rect, f32)> {
-    let mut glyphs = Vec::new();
+/// Each character's glyph in a galley, as it is reached: its index and its
+/// box, relative to the galley, plus its row's baseline.
+fn glyphs(galley: &egui::Galley) -> impl Iterator<Item = (usize, egui::Rect, f32)> + '_ {
     let mut index = 0;
-    for placed in &galley.rows {
+    galley.rows.iter().flat_map(move |placed| {
         let row = &placed.row;
-        for (offset, glyph) in row.glyphs.iter().enumerate() {
+        let first = index;
+        // A line break is a character without a glyph.
+        index += row.glyphs.len() + usize::from(placed.ends_with_newline);
+        row.glyphs.iter().enumerate().map(move |(offset, glyph)| {
             let min = Pos2::new(placed.pos.x + glyph.pos.x, placed.pos.y);
             let size = Vec2::new(glyph.advance_width, row.size.y);
             let baseline = placed.pos.y + glyph.pos.y;
-            glyphs.push((
-                index + offset,
+            (
+                first + offset,
                 egui::Rect::from_min_size(min, size),
                 baseline,
-            ));
-        }
-        // A line break is a character without a glyph.
-        index += row.glyphs.len() + usize::from(placed.ends_with_newline);
-    }
-    glyphs
+            )
+        })
+    })
 }
 
 /// The character under `pos`, relative to the galley.
 fn char_at(galley: &egui::Galley, pos: Vec2) -> Option<usize> {
     glyphs(galley)
-        .into_iter()
         .find(|(_, rect, _)| rect.contains(pos.to_pos2()))
         .map(|(index, _, _)| index)
 }
@@ -1626,10 +1647,7 @@ fn char_at(galley: &egui::Galley, pos: Vec2) -> Option<usize> {
 /// and baseline.
 fn underline(galley: &egui::Galley, chars: Range<usize>) -> Vec<(f32, f32, f32)> {
     let mut spans: Vec<(f32, f32, f32)> = Vec::new();
-    for (_, rect, baseline) in glyphs(galley)
-        .into_iter()
-        .filter(|(index, _, _)| chars.contains(index))
-    {
+    for (_, rect, baseline) in glyphs(galley).filter(|(index, _, _)| chars.contains(index)) {
         match spans.last_mut() {
             Some(span) if span.2 == baseline => span.1 = rect.right(),
             _ => spans.push((rect.left(), rect.right(), baseline)),
@@ -1958,6 +1976,37 @@ mod tests {
                 ("https://rail.example/b", "https://rail.example/b"),
             ]
         );
+    }
+
+    #[test]
+    fn a_body_is_searched_for_links_once_while_it_stays_on_screen() {
+        let ctx = egui::Context::default();
+        let text = "See https://rail.example/b now";
+        let first = cached_shown_text(&ctx, text, &[]);
+        let again = cached_shown_text(&ctx, text, &[]);
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+        assert_eq!(first.1.len(), 1);
+        let other = cached_shown_text(&ctx, "Something else", &[]);
+        assert!(!std::sync::Arc::ptr_eq(&first, &other));
+    }
+
+    #[test]
+    fn characters_are_found_by_position_across_lines() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            let galley = ui.painter().layout_no_wrap(
+                "ab\ncd".into(),
+                egui::FontId::proportional(14.0),
+                egui::Color32::WHITE,
+            );
+            let all: Vec<_> = glyphs(&galley).collect();
+            // The line break takes index 2, so "c" is character 3.
+            assert_eq!(all.iter().map(|g| g.0).collect::<Vec<_>>(), [0, 1, 3, 4]);
+            let (_, rect, _) = all[2];
+            assert_eq!(char_at(&galley, rect.center().to_vec2()), Some(3));
+            assert_eq!(char_at(&galley, Vec2::new(-5.0, -5.0)), None);
+        });
+        output.textures_delta.clear();
     }
 
     #[test]
