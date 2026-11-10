@@ -733,7 +733,9 @@ impl Keys {
             Focus::Settings => None,
             Focus::Compose => match press {
                 Press::Key(Key::Escape, _) => Some(Command::Act(Action::CloseCompose)),
-                _ => self.mapped(press, Scope::Compose, now).map(Bindable::command),
+                _ => self
+                    .mapped(press, Scope::Compose, now)
+                    .map(Bindable::command),
             },
             Focus::List => match press {
                 Press::Key(Key::Escape, _) => Some(Command::Act(Action::ClearSearch)),
