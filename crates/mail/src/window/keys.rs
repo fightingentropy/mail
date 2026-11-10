@@ -405,7 +405,8 @@ impl Chord {
             "down" => Key::ArrowDown,
             "left" => Key::ArrowLeft,
             "right" => Key::ArrowRight,
-            // "cmd++" wouldn't split cleanly.
+            // "cmd++" wouldn't split cleanly. Bare "plus" is the typed `+`.
+            "plus" if mods == Mods::default() => return Some(Chord::Text('+')),
             "plus" => Key::Plus,
             other => Key::from_name(other)?,
         };
@@ -414,6 +415,8 @@ impl Chord {
 
     fn to_config(self) -> String {
         let (key, mods) = match self {
+            // A bare `+` would not split back into parts.
+            Chord::Text('+') => return "plus".to_owned(),
             Chord::Text(character) => return character.to_string(),
             Chord::Key(key, mods) => (key, mods),
         };

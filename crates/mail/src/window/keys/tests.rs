@@ -212,6 +212,13 @@ fn shortcuts_read_and_write_as_text() {
 }
 
 #[test]
+fn a_recorded_plus_survives_saving_and_loading() {
+    let shortcut = Shortcut::new(vec![Chord::Text('+')]);
+    let text = shortcut.to_config();
+    assert_eq!(Shortcut::parse(&text), Some(shortcut));
+}
+
+#[test]
 fn shortcuts_display_like_macos_menus() {
     let display = |text: &str| Shortcut::parse(text).unwrap().display();
     assert_eq!(display("cmd+backspace"), "⌘⌫");
