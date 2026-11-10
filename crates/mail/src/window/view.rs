@@ -259,23 +259,7 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
     } else {
         Focus::List
     };
-    let held: Vec<(Press, bool)> = ctx.input(|input| {
-        input
-            .events
-            .iter()
-            .filter_map(|event| match event {
-                egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    repeat,
-                    ..
-                } => Some((Press::Key(*key, *modifiers), *repeat)),
-                egui::Event::Text(text) => Some((Press::Text(text.clone()), false)),
-                _ => None,
-            })
-            .collect()
-    });
+    let held = ctx.input(|input| held_presses(&input.events));
     let presses: Vec<Press> = held.iter().map(|(press, _)| press.clone()).collect();
     if let Some(settings) = &mut screen.settings {
         settings.record(
@@ -2019,5 +2003,63 @@ mod tests {
             shown.get_pixel(128, 128)[0] > 150,
             "the chosen photo, not Google's"
         );
+    }
+}
+
+/// The key and text presses in a frame's events, each flagged when it comes
+/// from a held key. Text events carry no repeat flag of their own, so a text
+/// press counts as a repeat when a key repeat arrives in the same frame (the
+/// platform sends both for an autorepeating symbol such as `#`).
+fn held_presses(events: &[egui::Event]) -> Vec<(Press, bool)> {
+    let key_repeating = events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::Key {
+                pressed: true,
+                repeat: true,
+                ..
+            }
+        )
+    });
+    events
+        .iter()
+        .filter_map(|event| match event {
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                repeat,
+                ..
+            } => Some((Press::Key(*key, *modifiers), *repeat)),
+            egui::Event::Text(text) => Some((Press::Text(text.clone()), key_repeating)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod held_tests {
+    use super::*;
+
+    fn key(repeat: bool) -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Num3,
+            physical_key: None,
+            pressed: true,
+            repeat,
+            modifiers: egui::Modifiers::SHIFT,
+        }
+    }
+
+    #[test]
+    fn text_from_a_repeating_key_is_a_repeat() {
+        let events = [key(true), egui::Event::Text("#".into())];
+        assert!(held_presses(&events).contains(&(Press::Text("#".into()), true)));
+    }
+
+    #[test]
+    fn text_from_a_first_press_is_not_a_repeat() {
+        let events = [key(false), egui::Event::Text("#".into())];
+        assert!(held_presses(&events).contains(&(Press::Text("#".into()), false)));
     }
 }
