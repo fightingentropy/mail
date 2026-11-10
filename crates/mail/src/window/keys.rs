@@ -5,7 +5,12 @@
 //! Esc, and the keys inside overlays (the label picker, the send
 //! confirmation), stay fixed, so a rebinding can never trap you.
 
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use egui::{Key, Modifiers};
 
@@ -675,11 +680,15 @@ fn default_shortcuts(bindable: Bindable) -> Vec<Shortcut> {
         .collect()
 }
 
+/// How long the first chord of a two-chord shortcut waits for its second.
+const SEQUENCE_WAIT: Duration = Duration::from_secs(1);
+
 /// Reads presses against the keymap, remembering the first chord of a
 /// two-chord shortcut.
 pub struct Keys {
     pub keymap: Keymap,
-    pending: Option<Chord>,
+    pending: Option<(Chord, Instant)>,
+    focus: Option<Focus>,
 }
 
 impl Keys {
@@ -687,10 +696,25 @@ impl Keys {
         Self {
             keymap,
             pending: None,
+            focus: None,
         }
     }
 
     pub fn command(&mut self, press: &Press, focus: Focus) -> Option<Command> {
+        self.command_at(press, focus, Instant::now())
+    }
+
+    fn command_at(&mut self, press: &Press, focus: Focus, now: Instant) -> Option<Command> {
+        // A first key left over from before the focus moved, or from long
+        // ago, is not the start of this press's shortcut.
+        if self.focus.replace(focus) != Some(focus) {
+            self.pending = None;
+        }
+        if let Some((_, at)) = self.pending
+            && now.saturating_duration_since(at) >= SEQUENCE_WAIT
+        {
+            self.pending = None;
+        }
         match focus {
             Focus::Search => search_key(press),
             Focus::Picker => picker_key(press),
@@ -701,7 +725,7 @@ impl Keys {
             },
             // The overlay closes itself on Esc or a click outside, and on
             // its own shortcut.
-            Focus::Help => match self.mapped(press, Scope::Mail) {
+            Focus::Help => match self.mapped(press, Scope::Mail, now) {
                 Some(Bindable::Shortcuts) => Some(Command::Act(Action::ToggleHelp)),
                 _ => None,
             },
@@ -709,19 +733,19 @@ impl Keys {
             Focus::Settings => None,
             Focus::Compose => match press {
                 Press::Key(Key::Escape, _) => Some(Command::Act(Action::CloseCompose)),
-                _ => self.mapped(press, Scope::Compose).map(Bindable::command),
+                _ => self.mapped(press, Scope::Compose, now).map(Bindable::command),
             },
             Focus::List => match press {
                 Press::Key(Key::Escape, _) => Some(Command::Act(Action::ClearSearch)),
-                _ => self.mapped(press, Scope::Mail).map(Bindable::command),
+                _ => self.mapped(press, Scope::Mail, now).map(Bindable::command),
             },
         }
     }
 
-    fn mapped(&mut self, press: &Press, scope: Scope) -> Option<Bindable> {
+    fn mapped(&mut self, press: &Press, scope: Scope, now: Instant) -> Option<Bindable> {
         let chord = Chord::from_press(press)?;
         let first = self.pending.take();
-        if let Some(first) = first {
+        if let Some((first, _)) = first {
             match self.keymap.lookup(scope, &[first, chord]) {
                 Lookup::Exact(bindable) => return Some(bindable),
                 // A sequence that went nowhere: the second key may still
@@ -732,7 +756,7 @@ impl Keys {
         match self.keymap.lookup(scope, &[chord]) {
             Lookup::Exact(bindable) => Some(bindable),
             Lookup::Prefix => {
-                self.pending = Some(chord);
+                self.pending = Some((chord, now));
                 None
             }
             Lookup::None => None,

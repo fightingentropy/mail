@@ -288,3 +288,35 @@ fn a_broken_file_gives_the_defaults() {
     let keymap = Keymap::load(&path);
     assert_eq!(keymap.hint(Bindable::Archive), "y");
 }
+
+#[test]
+fn a_first_key_waits_only_a_second_for_its_partner() {
+    let now = Instant::now();
+    let letter = |text: &str| Key::from_name(text).map(key).unwrap();
+    let mut keys = keys();
+    let list = Focus::List;
+    assert_eq!(keys.command_at(&letter("G"), list, now), None);
+    // Pressed together, as quickly as typed: a jump.
+    assert_eq!(
+        keys.command_at(&letter("S"), list, now + Duration::from_millis(300)),
+        Some(Bindable::GoStarred.command())
+    );
+    // A stray g, then s minutes later is just star.
+    assert_eq!(keys.command_at(&letter("G"), list, now), None);
+    assert_eq!(
+        keys.command_at(&letter("S"), list, now + Duration::from_secs(90)),
+        act(Action::ToggleStar)
+    );
+}
+
+#[test]
+fn a_first_key_is_dropped_when_focus_moves() {
+    let now = Instant::now();
+    let mut keys = keys();
+    assert_eq!(keys.command_at(&key(Key::G), Focus::List, now), None);
+    assert_eq!(keys.command_at(&key(Key::A), Focus::Search, now), None);
+    assert_eq!(
+        keys.command_at(&key(Key::S), Focus::List, now),
+        act(Action::ToggleStar)
+    );
+}
