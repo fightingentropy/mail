@@ -1709,11 +1709,13 @@ fn size(bytes: i64) -> String {
 fn status_bar(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut Vec<Action>) {
     let palette = theme::palette(ui.ctx());
     ui.horizontal_centered(|ui| {
-        let pending = model.pending_changes();
         let (text, color) = match &screen.status {
             SyncStatus::Demo => ("Demo mailbox".to_owned(), palette.dim),
             SyncStatus::Working(text) => (text.clone(), palette.secondary),
             SyncStatus::Failed(error) => {
+                // Only counted here: it reads the database, and this runs
+                // on every frame.
+                let pending = model.pending_changes();
                 let waiting = if pending > 0 {
                     format!(" · {pending} changes waiting")
                 } else {
