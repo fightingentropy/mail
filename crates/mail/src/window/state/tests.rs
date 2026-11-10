@@ -824,3 +824,15 @@ fn settings_can_make_emails_read_as_text() {
     model.apply(Action::ToggleOriginal).unwrap();
     assert!(model.showing_original().is_some());
 }
+
+#[test]
+fn reply_and_new_message_keep_an_unsaved_compose() {
+    let (mut model, _folder) = model();
+    compose_to(&mut model, "maya@fastmail.test");
+    model.apply(Action::Reply).unwrap();
+    model.apply(Action::ReplyAll).unwrap();
+    model.apply(Action::NewMessage).unwrap();
+    let compose = model.compose.as_ref().unwrap();
+    assert_eq!(compose.to, "maya@fastmail.test");
+    assert_eq!(compose.body, "7:30 works.");
+}

@@ -558,6 +558,9 @@ impl Model {
             Action::ToggleHelp => self.help = !self.help,
             Action::CloseHelp => self.help = false,
             Action::Reply | Action::ReplyAll => {
+                if self.compose_blocks_new() {
+                    return Ok(());
+                }
                 let all = action == Action::ReplyAll;
                 let own = self
                     .open
@@ -571,6 +574,9 @@ impl Model {
                 }
             }
             Action::NewMessage => {
+                if self.compose_blocks_new() {
+                    return Ok(());
+                }
                 // From the account shown, or the first when all are.
                 if let Some(from) = self.header_account() {
                     self.compose = Some(Compose::new_message(&from.email));
@@ -843,6 +849,18 @@ impl Model {
     /// Writes the new message from another account. A copy already in the
     /// old account's Drafts is discarded there; the next save puts it in the
     /// new account's.
+    /// True, with a notice, when starting another message would throw away
+    /// the one being written: unsaved edits, or a save or send in flight.
+    fn compose_blocks_new(&mut self) -> bool {
+        let busy = self.compose.as_ref().is_some_and(|compose| {
+            compose.is_dirty() || compose.is_saving() || compose.is_sending()
+        });
+        if busy {
+            self.notify("Save or discard the message you are writing first.".into());
+        }
+        busy
+    }
+
     fn set_from(&mut self, address: &str) {
         let known = self.accounts.iter().any(|account| account.email == address);
         let Some(compose) = &mut self.compose else {
