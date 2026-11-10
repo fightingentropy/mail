@@ -619,6 +619,16 @@ impl Model {
                 }
             }
             Action::DiscardDraft => {
+                // A save or send in flight would still land, so discarding
+                // now would orphan a draft or lose a sent message's record.
+                if self
+                    .compose
+                    .as_ref()
+                    .is_some_and(|compose| compose.is_saving() || compose.is_sending())
+                {
+                    self.notify("Wait for the draft to finish saving or sending.".into());
+                    return Ok(());
+                }
                 if let Some(compose) = self.compose.take() {
                     if let Some(draft_id) = compose.draft_id {
                         self.effects.push(Effect::DiscardDraft {
@@ -666,7 +676,11 @@ impl Model {
             }
             Action::CancelSend => self.confirm_send = None,
             Action::MessageSent => {
-                self.compose = None;
+                // Only the message that was sent closes; a new one the user
+                // has started since is left alone.
+                if self.compose.as_ref().is_none_or(Compose::is_sending) {
+                    self.compose = None;
+                }
                 self.notify("Sent.".into());
                 self.wants_sync = true;
             }

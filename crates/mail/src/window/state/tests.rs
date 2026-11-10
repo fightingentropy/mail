@@ -882,3 +882,33 @@ fn set_from_keeps_its_own_doc_comment() {
         "set_from's doc comment is not its own"
     );
 }
+
+#[test]
+fn discarding_waits_for_a_save_or_send_in_flight() {
+    let (mut model, _folder) = model();
+    compose_to(&mut model, "maya@fastmail.test");
+    model.apply(Action::SaveDraft).unwrap();
+    model.effects.clear();
+    model.apply(Action::DiscardDraft).unwrap();
+    assert!(model.compose.is_some(), "a save is still on its way");
+    assert!(model.effects.is_empty());
+
+    model.apply(Action::DraftSaved("draft-1".into())).unwrap();
+    model.apply(Action::RequestSend).unwrap();
+    model.apply(Action::ConfirmSend).unwrap();
+    model.effects.clear();
+    model.apply(Action::DiscardDraft).unwrap();
+    assert!(model.compose.as_ref().unwrap().is_sending());
+    assert!(model.effects.is_empty());
+}
+
+#[test]
+fn a_sent_notice_does_not_close_a_newer_message() {
+    let (mut model, _folder) = model();
+    compose_to(&mut model, "maya@fastmail.test");
+    // The message that was sent is gone; the user is writing another.
+    model.compose = None;
+    compose_to(&mut model, "lee@fastmail.test");
+    model.apply(Action::MessageSent).unwrap();
+    assert!(model.compose.is_some());
+}
