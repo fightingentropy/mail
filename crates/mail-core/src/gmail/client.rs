@@ -181,6 +181,21 @@ impl GmailClient {
         units: u32,
         request: impl Fn(&str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     ) -> anyhow::Result<Reply<T>> {
+        self.send_once_if(true, path, units, request)
+    }
+
+    /// Like [`Self::send`]. With `repeatable` false, an answer that might
+    /// have come after Gmail acted (a timeout, a dropped connection or a 5xx)
+    /// is not retried, because repeating the request could act twice or find
+    /// its own earlier effect and misreport it. Refusals that Gmail gives
+    /// before acting (quota, an expired token) are still retried.
+    fn send_once_if<T: DeserializeOwned>(
+        &self,
+        repeatable: bool,
+        path: &str,
+        units: u32,
+        request: impl Fn(&str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> anyhow::Result<Reply<T>> {
         let mut refreshed = false;
         let mut attempt = 0;
         loop {
@@ -189,9 +204,16 @@ impl GmailClient {
             let authorization = format!("Bearer {}", self.access_token()?);
             let mut response = match request(&authorization) {
                 Ok(response) => response,
-                Err(error) if attempt < MAX_ATTEMPTS && is_transient(&error) => {
+                Err(error) if repeatable && attempt < MAX_ATTEMPTS && is_transient(&error) => {
                     thread::sleep(back_off(attempt));
                     continue;
+                }
+                Err(error) if !repeatable && is_transient(&error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Gmail did not answer for {path}; the request may have gone through"
+                        )
+                    });
                 }
                 Err(error) => return Err(error).context("Could not reach Gmail"),
             };
@@ -222,6 +244,12 @@ impl GmailClient {
                 self.forget_access_token();
                 refreshed = true;
                 continue;
+            }
+            if !repeatable && (500..=504).contains(&status) {
+                bail!(
+                    "Gmail returned {status} for {path}, so the request may have gone through: {}",
+                    error_message(&body)
+                );
             }
             if attempt < MAX_ATTEMPTS && should_retry(status, &body) {
                 // Every worker waits, not just this one: the quota is shared.
@@ -458,12 +486,15 @@ impl GmailApi for GmailClient {
         }
         let url = format!("{API}/drafts/send");
         let body = serde_json::json!({"id": draft_id});
-        let reply = self.send::<Sent>("drafts/send", SEND_DRAFT_UNITS, |authorization| {
-            self.http
-                .post(&url)
-                .header("Authorization", authorization)
-                .send_json(&body)
-        })?;
+        // Not repeatable: if the answer is lost after Gmail sent the draft, a
+        // second try would find it gone and report that nothing was sent.
+        let reply =
+            self.send_once_if::<Sent>(false, "drafts/send", SEND_DRAFT_UNITS, |authorization| {
+                self.http
+                    .post(&url)
+                    .header("Authorization", authorization)
+                    .send_json(&body)
+            })?;
         match reply {
             Reply::Done(sent) => Ok(sent.id),
             Reply::NotFound => bail!("The draft is gone from Gmail; nothing was sent"),
@@ -647,6 +678,37 @@ mod tests {
             r#"{"error": {"message": "Insufficient Permission"}}"#
         ));
         assert!(!should_retry(400, ""));
+    }
+
+    fn client_with_token() -> GmailClient {
+        let token = AccessToken {
+            value: "fake".into(),
+            expires_at: Instant::now() + Duration::from_secs(3600),
+        };
+        GmailClient::new(
+            OAuthClient {
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            "refresh".into(),
+            Some(token),
+        )
+    }
+
+    #[test]
+    fn sending_a_draft_is_not_repeated_after_a_lost_answer() {
+        let calls = std::cell::Cell::new(0);
+        let lost = |_: &str| {
+            calls.set(calls.get() + 1);
+            Err(ureq::Error::Io(std::io::Error::other("connection reset")))
+        };
+        let client = client_with_token();
+        let error = match client.send_once_if::<IgnoredAny>(false, "drafts/send", 1, lost) {
+            Err(error) => error,
+            Ok(_) => panic!("a lost answer cannot succeed"),
+        };
+        assert_eq!(calls.get(), 1, "drafts/send must not be repeated");
+        assert!(format!("{error:#}").contains("may have gone through"));
     }
 
     const WINDOW: Duration = Duration::from_secs(60);
