@@ -278,8 +278,15 @@ fn tag_name(tag: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Byte offset of the first ASCII-case-insensitive match of `needle`. Looks
+/// at the haystack in place: copying the rest of the message for every
+/// skipped element made a message with many of them quadratic.
 fn find_ignoring_case(haystack: &str, needle: &str) -> Option<usize> {
-    haystack.to_ascii_lowercase().find(needle)
+    let needle = needle.as_bytes();
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// Source whitespace collapses to single spaces, as in a browser.
@@ -406,6 +413,26 @@ pub(crate) fn is_invisible(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_a_closing_tag_in_any_case() {
+        assert_eq!(find_ignoring_case("a</STYLE>", "</style"), Some(1));
+        assert_eq!(find_ignoring_case("a</styl", "</style"), None);
+        assert_eq!(find_ignoring_case("é</Style>", "</style"), Some(2));
+    }
+
+    #[test]
+    fn many_skipped_elements_stay_fast() {
+        let html = "<style>p{}</style><p>hi</p>".repeat(40_000);
+        let started = std::time::Instant::now();
+        let text = to_text(&html);
+        assert!(text.starts_with("hi"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
 
     #[test]
     fn keeps_text_and_block_breaks() {
