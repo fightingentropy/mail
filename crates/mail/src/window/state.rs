@@ -239,8 +239,49 @@ pub struct Picker {
 struct Undo {
     account_id: i64,
     thread_id: String,
-    labels_before: BTreeSet<String>,
-    trashed: bool,
+    /// The changes that reverse the one just applied, in order. Only what
+    /// that change did is reversed, so labels sync added since stay.
+    inverse: Vec<Change>,
+}
+
+/// The changes that put a thread whose labels were `before` back after
+/// `change` was applied to it.
+fn inverse_of(change: &Change, before: &BTreeSet<String>) -> Vec<Change> {
+    match change {
+        Change::Labels { add, remove } => {
+            let restore: Vec<String> = remove
+                .iter()
+                .filter(|label| before.contains(*label))
+                .cloned()
+                .collect();
+            let drop: Vec<String> = add
+                .iter()
+                .filter(|label| !before.contains(*label))
+                .cloned()
+                .collect();
+            if restore.is_empty() && drop.is_empty() {
+                Vec::new()
+            } else {
+                vec![Change::Labels {
+                    add: restore,
+                    remove: drop,
+                }]
+            }
+        }
+        // Trashing also takes the thread out of the inbox.
+        Change::Trash => {
+            let mut undo = Vec::new();
+            if !before.contains("TRASH") {
+                undo.push(Change::Untrash);
+            }
+            if before.contains("INBOX") {
+                undo.push(Change::add("INBOX"));
+            }
+            undo
+        }
+        Change::Untrash if before.contains("TRASH") => vec![Change::add("TRASH")],
+        Change::Untrash => Vec::new(),
+    }
 }
 
 pub struct Model {
@@ -1016,9 +1057,9 @@ impl Model {
             return Ok(());
         };
         let (account, thread_id) = (thread.account_id, thread.thread_id.clone());
+        let before: BTreeSet<String> = thread.label_ids.iter().cloned().collect();
         self.undo = Some(Undo {
-            labels_before: thread.label_ids.iter().cloned().collect(),
-            trashed: change == Change::Trash,
+            inverse: inverse_of(&change, &before),
             account_id: account,
             thread_id: thread_id.clone(),
         });
@@ -1054,21 +1095,8 @@ impl Model {
             return Ok(());
         };
         let account = undo.account_id;
-        if undo.trashed {
-            self.store
-                .apply_change(account, &undo.thread_id, &Change::Untrash)?;
-        }
-        let now: BTreeSet<String> = self
-            .store
-            .thread(account, &undo.thread_id)?
-            .into_iter()
-            .flat_map(|message| message.label_ids)
-            .collect();
-        let add: Vec<String> = undo.labels_before.difference(&now).cloned().collect();
-        let remove: Vec<String> = now.difference(&undo.labels_before).cloned().collect();
-        if !add.is_empty() || !remove.is_empty() {
-            self.store
-                .apply_change(account, &undo.thread_id, &Change::Labels { add, remove })?;
+        for change in &undo.inverse {
+            self.store.apply_change(account, &undo.thread_id, change)?;
         }
         self.notify("Undone.".into());
         self.wants_sync = true;

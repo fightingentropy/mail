@@ -912,3 +912,39 @@ fn a_sent_notice_does_not_close_a_newer_message() {
     model.apply(Action::MessageSent).unwrap();
     assert!(model.compose.is_some());
 }
+
+#[test]
+fn undo_leaves_labels_that_sync_added_after_the_change() {
+    let (mut model, _folder) = model();
+    let read = model.threads.iter().position(|t| !t.unread).unwrap();
+    model.apply(Action::Select(read)).unwrap();
+    let thread = model.selected_thread().unwrap();
+    let (account, thread_id) = (thread.account_id, thread.thread_id.clone());
+    model.apply(Action::Archive).unwrap();
+
+    // Sync delivers a new message to the thread, unread and in the inbox.
+    let path = _folder.path().join("mail.sqlite3");
+    let mut sync = Store::open(&path).unwrap();
+    sync.save_messages(
+        account,
+        &[mail_core::model::Message {
+            gmail_id: "arrived-later".into(),
+            thread_id: thread_id.clone(),
+            internal_date: i64::MAX / 4,
+            label_ids: vec!["INBOX".into(), "UNREAD".into()],
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+
+    model.apply(Action::Undo).unwrap();
+    let labels: BTreeSet<String> = model
+        .store
+        .thread(account, &thread_id)
+        .unwrap()
+        .into_iter()
+        .flat_map(|message| message.label_ids)
+        .collect();
+    assert!(labels.contains("UNREAD"), "the new message was marked read");
+    assert!(labels.contains("INBOX"));
+}
