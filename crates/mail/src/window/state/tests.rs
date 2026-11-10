@@ -848,3 +848,19 @@ fn searching_and_switching_mailbox_leave_the_sidebar_counts_alone() {
     model.reload().unwrap();
     assert!(!model.unread.is_empty(), "a full reload refreshes them");
 }
+
+#[test]
+fn a_held_key_does_not_repeat_sending_or_removing_mail() {
+    for action in [
+        Action::RequestSend,
+        Action::ConfirmSend,
+        Action::Archive,
+        Action::Trash,
+        Action::DiscardDraft,
+    ] {
+        assert!(action.once_per_press(), "{action:?}");
+    }
+    // Moving through the list still follows a held arrow key.
+    assert!(!Action::Next.once_per_press());
+    assert!(!Action::Previous.once_per_press());
+}

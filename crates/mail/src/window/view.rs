@@ -259,7 +259,7 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
     } else {
         Focus::List
     };
-    let presses: Vec<Press> = ctx.input(|input| {
+    let held: Vec<(Press, bool)> = ctx.input(|input| {
         input
             .events
             .iter()
@@ -268,13 +268,15 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
                     key,
                     pressed: true,
                     modifiers,
+                    repeat,
                     ..
-                } => Some(Press::Key(*key, *modifiers)),
-                egui::Event::Text(text) => Some(Press::Text(text.clone())),
+                } => Some((Press::Key(*key, *modifiers), *repeat)),
+                egui::Event::Text(text) => Some((Press::Text(text.clone()), false)),
                 _ => None,
             })
             .collect()
     });
+    let presses: Vec<Press> = held.iter().map(|(press, _)| press.clone()).collect();
     if let Some(settings) = &mut screen.settings {
         settings.record(
             ctx,
@@ -284,7 +286,7 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
         );
         return;
     }
-    for press in presses {
+    for (press, repeat) in held {
         match screen.keys.command(&press, focus) {
             Some(Command::Act(action)) => {
                 // Keep send keys away from the text fields: ⌘Enter and the
@@ -295,7 +297,10 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
                     ctx.input_mut(|input| input.consume_key(modifiers, key));
                     ctx.memory_mut(|memory| memory.stop_text_input());
                 }
-                actions.push(action);
+                // A held key must not confirm a send or trash a run of threads.
+                if !(repeat && action.once_per_press()) {
+                    actions.push(action);
+                }
             }
             Some(Command::FocusSearch) => screen.focus_search = true,
             Some(Command::FocusList) => {

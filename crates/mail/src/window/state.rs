@@ -39,6 +39,22 @@ pub enum View {
     Search(String),
 }
 
+impl Action {
+    /// Actions that must not fire again while a key is held down: they send,
+    /// discard or remove mail, and the first press may already have been
+    /// the one that asked.
+    pub fn once_per_press(&self) -> bool {
+        matches!(
+            self,
+            Action::RequestSend
+                | Action::ConfirmSend
+                | Action::Archive
+                | Action::Trash
+                | Action::DiscardDraft
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Next,
