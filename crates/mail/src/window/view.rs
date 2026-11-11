@@ -1545,9 +1545,6 @@ fn body(ui: &mut egui::Ui, text: &str, link_words: &[BodyLink]) -> Option<String
     clicked.then(|| url.clone())
 }
 
-/// The body as the reader shows it, and each link's place in that text: the
-/// words that link (from the HTML) and the addresses written in the text,
-/// long ones shortened to their site.
 /// What `shown_text` makes of a body, kept while the body keeps being drawn,
 /// so a long message is not searched for links on every frame.
 type Shown = std::sync::Arc<(String, Vec<(Range<usize>, String)>)>;
@@ -1571,6 +1568,9 @@ fn cached_shown_text(ctx: &egui::Context, text: &str, link_words: &[BodyLink]) -
     })
 }
 
+/// The body as the reader shows it, and each link's place in that text: the
+/// words that link (from the HTML) and the addresses written in the text,
+/// long ones shortened to their site.
 fn shown_text(text: &str, link_words: &[BodyLink]) -> (String, Vec<(Range<usize>, String)>) {
     // Linked words come first; an address inside them stays part of them.
     let mut found: Vec<(Range<usize>, String, bool)> = link_words
@@ -1931,6 +1931,24 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn the_shown_text_description_sits_on_shown_text() {
+        let source = include_str!("view.rs");
+        let doc_above = |item: &str| -> String {
+            let lines: Vec<&str> = source.lines().collect();
+            let at = lines.iter().position(|l| l.starts_with(item)).unwrap();
+            lines[..at]
+                .iter()
+                .rev()
+                .take_while(|l| l.starts_with("///"))
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(doc_above("fn shown_text(").contains("The body as the reader shows it"));
+        assert!(!doc_above("type Shown =").contains("The body as the reader shows it"));
+    }
 
     #[test]
     fn a_saved_photo_becomes_a_small_square_texture() {
