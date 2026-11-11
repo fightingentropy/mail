@@ -121,6 +121,16 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
             } else {
                 SyncStatus::Working("Syncing…".into())
             };
+            // Screenshots build originals on the spot, so they come out the
+            // same every time; they don't show them anyway.
+            if originals {
+                let ctx = creation.egui_ctx.clone();
+                if let Err(error) =
+                    model.start_original_loader(&paths.database(), move || ctx.request_repaint())
+                {
+                    eprintln!("mail: originals load on the window thread: {error:#}");
+                }
+            }
             let mut screen = Screen::new(status, paths.clone(), preferences);
             screen.original_available = originals;
             Ok(Box::new(Shell {
@@ -214,6 +224,7 @@ impl eframe::App for Shell {
         self.receive_downloads();
         self.receive_sign_ins();
         self.receive_photos();
+        self.model.receive_originals();
         if let Some(syncer) = &self.syncer
             && (std::mem::take(&mut self.model.wants_sync)
                 || std::mem::take(&mut self.screen.sync_requested))

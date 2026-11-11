@@ -1125,8 +1125,23 @@ fn reader(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut V
                             .color(palette.accent),
                     );
                 }
-                // A message with an original, read as text for now.
-                if open.original.is_some() && screen.original_available {
+                // Its original is on its way: the headers and text show
+                // meanwhile rather than an empty pane.
+                if screen.original_available
+                    && open.loading_original()
+                    && model.show_original
+                    && model.compose.is_none()
+                {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Loading the original…")
+                            .font(theme::regular(13.0))
+                            .color(palette.dim),
+                    );
+                } else if screen.original_available
+                    && (open.original.is_some() || open.loading_original())
+                {
+                    // A message with an original, read as text for now.
                     ui.add_space(8.0);
                     let toggle = screen.keys.keymap.hint(Bindable::ToggleOriginal);
                     if pill_button(ui, ButtonIcon::Original, "Show original", &toggle).clicked() {
