@@ -948,3 +948,273 @@ fn undo_leaves_labels_that_sync_added_after_the_change() {
     assert!(labels.contains("UNREAD"), "the new message was marked read");
     assert!(labels.contains("INBOX"));
 }
+
+const WAIT: Duration = Duration::from_secs(10);
+const NEWSLETTER: &str = "This week: async traits, SQLite tips and egui 0.36";
+
+/// The demo mailbox, building originals on a thread of their own.
+fn loading_model() -> (Model, tempfile::TempDir) {
+    let (mut model, folder) = model();
+    model
+        .start_original_loader(&folder.path().join("mail.sqlite3"), || {})
+        .unwrap();
+    (model, folder)
+}
+
+/// Like [`loading_model`], with each built original held until released.
+/// The first receiver hears of each build as it finishes.
+fn gated_model() -> (
+    Model,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+    tempfile::TempDir,
+) {
+    let (mut model, folder) = model();
+    let store = Store::open_read_only(&folder.path().join("mail.sqlite3")).unwrap();
+    let (loader, built, release) = originals::Loader::gated(store);
+    model.originals = Some(loader);
+    (model, built, release, folder)
+}
+
+fn open_id(model: &Model) -> &str {
+    &model.open.as_ref().unwrap().messages[0].gmail_id
+}
+
+#[test]
+fn opening_an_original_shows_text_while_it_loads_off_thread() {
+    let (mut model, _folder) = loading_model();
+    open_receipt(&mut model);
+    let open = model.open.as_ref().unwrap();
+    assert!(model.showing_original().is_none(), "not built on the spot");
+    assert!(open.loading_original());
+    assert_eq!(open.messages[0].body_text, "Thanks for your order.");
+    assert!(model.effects.is_empty(), "pictures wait for the page");
+
+    assert!(model.wait_for_original(WAIT));
+    assert_eq!(model.showing_original().unwrap().message_id, "receipt");
+    let [Effect::FetchInlineImages { wanted, .. }] = model.effects.as_slice() else {
+        panic!("expected one request, got {:?}", model.effects);
+    };
+    assert_eq!(wanted, &["logo@shop"]);
+}
+
+#[test]
+fn a_result_for_a_thread_no_longer_selected_is_dropped() {
+    let (mut model, built, release, _folder) = gated_model();
+    let account = open_receipt(&mut model);
+    // The receipt's page is built and waiting when the selection moves on.
+    built.recv_timeout(WAIT).unwrap();
+    select(&mut model, "Next steps: senior full-stack engineer");
+    release.send(()).unwrap();
+    assert!(model.receive_one_original(WAIT), "the late page arrived");
+    assert!(model.open.as_ref().unwrap().original.is_none());
+    assert!(
+        !model.cache.contains(account, "receipt"),
+        "and was not kept"
+    );
+
+    select(&mut model, "Your receipt");
+    assert!(model.open.as_ref().unwrap().loading_original());
+    assert!(model.showing_original().is_none());
+}
+
+#[test]
+fn holding_j_applies_only_the_last_original() {
+    let (mut model, built, release, _folder) = gated_model();
+    open_receipt(&mut model);
+    // The first page is built and held while j and k go on.
+    built.recv_timeout(WAIT).unwrap();
+    let newsletter = model
+        .threads
+        .iter()
+        .position(|t| t.subject == NEWSLETTER)
+        .unwrap();
+    for step in 0..12 {
+        model
+            .apply(if step % 3 == 2 {
+                Action::Previous
+            } else {
+                Action::Next
+            })
+            .unwrap();
+        model.receive_originals();
+        if let Some(original) = model.showing_original() {
+            assert_eq!(original.message_id, open_id(&model));
+        }
+    }
+    model.apply(Action::Select(newsletter)).unwrap();
+    assert!(model.showing_original().is_none());
+    // Let everything through: the held page, then the newest asked for.
+    for _ in 0..12 {
+        let _ = release.send(());
+    }
+    assert!(model.wait_for_original(WAIT));
+    let wanted = open_id(&model).to_owned();
+    assert_eq!(model.showing_original().unwrap().message_id, wanted);
+    assert_eq!(selected_subject(&model), NEWSLETTER);
+}
+
+#[test]
+fn reopening_a_message_uses_the_cache() {
+    let (mut model, _folder) = loading_model();
+    open_receipt(&mut model);
+    assert!(model.wait_for_original(WAIT));
+    select(&mut model, "Next steps: senior full-stack engineer");
+    select(&mut model, "Your receipt");
+    assert_eq!(model.showing_original().unwrap().message_id, "receipt");
+    assert!(!model.open.as_ref().unwrap().loading_original());
+}
+
+#[test]
+fn arriving_pictures_rebuild_off_thread_keeping_the_page() {
+    let (mut model, _folder) = loading_model();
+    let account = open_receipt(&mut model);
+    assert!(model.wait_for_original(WAIT));
+    model
+        .apply(Action::InlineImagesArrived {
+            account_id: account,
+            message_id: "receipt".into(),
+            images: Ok(vec![logo()]),
+        })
+        .unwrap();
+    assert_eq!(
+        model.showing_original().unwrap().inline,
+        0,
+        "old page stays"
+    );
+    assert!(model.open.as_ref().unwrap().loading_original());
+
+    assert!(model.wait_for_original(WAIT));
+    let original = model.showing_original().unwrap();
+    assert_eq!(original.inline, 1);
+    assert!(original.html.contains("data:image/png;base64,"));
+
+    select(&mut model, "Next steps: senior full-stack engineer");
+    select(&mut model, "Your receipt");
+    assert_eq!(model.showing_original().unwrap().inline, 1, "kept with it");
+}
+
+#[test]
+fn pictures_arriving_while_the_page_first_loads_are_not_lost() {
+    let (mut model, built, release, _folder) = gated_model();
+    let account = open_receipt(&mut model);
+    // The page was read before the pictures were saved.
+    built.recv_timeout(WAIT).unwrap();
+    model
+        .apply(Action::InlineImagesArrived {
+            account_id: account,
+            message_id: "receipt".into(),
+            images: Ok(vec![logo()]),
+        })
+        .unwrap();
+    release.send(()).unwrap();
+    assert!(model.receive_one_original(WAIT));
+    assert!(
+        model.showing_original().is_none(),
+        "the page without them is dropped"
+    );
+
+    built.recv_timeout(WAIT).unwrap();
+    release.send(()).unwrap();
+    assert!(model.wait_for_original(WAIT));
+    assert_eq!(model.showing_original().unwrap().inline, 1);
+    assert_eq!(model.cache.get(account, "receipt").unwrap().inline, 1);
+}
+
+#[test]
+fn pictures_for_a_message_not_open_replace_its_kept_page() {
+    for loader in [false, true] {
+        let (mut model, folder) = model();
+        if loader {
+            model
+                .start_original_loader(&folder.path().join("mail.sqlite3"), || {})
+                .unwrap();
+        }
+        let account = open_receipt(&mut model);
+        assert!(model.wait_for_original(WAIT));
+        assert!(model.cache.contains(account, "receipt"));
+        select(&mut model, "Next steps: senior full-stack engineer");
+        model
+            .apply(Action::InlineImagesArrived {
+                account_id: account,
+                message_id: "receipt".into(),
+                images: Ok(vec![logo()]),
+            })
+            .unwrap();
+        select(&mut model, "Your receipt");
+        assert!(model.wait_for_original(WAIT));
+        let original = model.showing_original().unwrap();
+        assert_eq!(original.inline, 1, "with the loader: {loader}");
+        assert!(original.html.contains("data:image/png;base64,"));
+    }
+}
+
+#[test]
+fn async_and_sync_originals_are_identical() {
+    let built = |loader: bool| {
+        let (mut model, folder) = model();
+        if loader {
+            model
+                .start_original_loader(&folder.path().join("mail.sqlite3"), || {})
+                .unwrap();
+        }
+        let account = model.accounts[0].id;
+        open_receipt(&mut model);
+        model
+            .store
+            .save_inline_images(account, "receipt", &[logo()])
+            .unwrap();
+        select(&mut model, "Next steps: senior full-stack engineer");
+        model.cache.remove(account, "receipt");
+        select(&mut model, "Your receipt");
+        assert_eq!(model.open.as_ref().unwrap().loading_original(), loader);
+        assert!(model.wait_for_original(WAIT));
+        let original = model.showing_original().unwrap();
+        (
+            original.html.to_string(),
+            original.inline,
+            original.missing.clone(),
+        )
+    };
+    let on_the_spot = built(false);
+    assert_eq!(on_the_spot.1, 1);
+    assert_eq!(built(true), on_the_spot);
+}
+
+#[test]
+fn a_dead_loader_falls_back_to_loading_on_the_window_thread() {
+    let (mut model, _folder) = model();
+    model.originals = Some(originals::Loader::dead());
+    open_receipt(&mut model);
+    assert!(model.originals.is_none(), "a failed request gives up on it");
+    assert_eq!(model.showing_original().unwrap().message_id, "receipt");
+
+    // Gone after taking the request: the one waiting is built here.
+    model.originals = Some(originals::Loader::dies_after_asking());
+    select(&mut model, NEWSLETTER);
+    assert!(model.open.as_ref().unwrap().loading_original());
+    model.receive_originals();
+    assert!(model.originals.is_none());
+    assert!(!model.open.as_ref().unwrap().loading_original());
+    assert_eq!(
+        model.showing_original().unwrap().message_id,
+        open_id(&model)
+    );
+
+    model.cache = originals::Cache::default();
+    select(&mut model, "Your receipt");
+    assert!(model.showing_original().is_some(), "later ones too");
+}
+
+#[test]
+fn toggle_original_works_while_loading() {
+    let (mut model, _folder) = loading_model();
+    model.show_original = false;
+    open_receipt(&mut model);
+    assert!(model.open.as_ref().unwrap().loading_original());
+    model.apply(Action::ToggleOriginal).unwrap();
+    assert!(model.show_original);
+    assert_eq!(model.notice(), None);
+    assert!(model.wait_for_original(WAIT));
+    assert!(model.showing_original().is_some());
+}

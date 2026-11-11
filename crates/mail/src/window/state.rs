@@ -4,6 +4,8 @@
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    path::Path,
+    sync::{Arc, mpsc::TryRecvError},
     time::{Duration, Instant},
 };
 
@@ -15,6 +17,7 @@ use mail_core::{
 };
 
 use super::compose::Compose;
+use originals::{Built, Loaded, Loader, Request};
 
 /// How long a selected unread thread stays on screen before it counts as read.
 pub const READ_AFTER: Duration = Duration::from_millis(1500);
@@ -208,7 +211,7 @@ pub struct SendSummary {
 pub struct OriginalHtml {
     pub message_id: String,
     /// With the pictures sent inside it in place, as far as Mail has them.
-    pub html: String,
+    pub html: Arc<str>,
     /// Remote images may load: they tell the sender you opened it.
     pub images: bool,
     /// How many of the pictures sent inside it are in place, so the view
@@ -224,10 +227,41 @@ pub struct OpenThread {
     pub thread_id: String,
     /// The HTML of a thread that is one message, as newsletters and
     /// receipts are. Conversations read as text.
+    /// `None` while it is first built, `Some` once it can be shown.
     pub original: Option<OriginalHtml>,
+    /// The original being built away from the window thread. Set with no
+    /// `original` while it first loads, when the reader shows the headers
+    /// and text; set with one while pictures that arrived are put in,
+    /// when the old page stays.
+    loading: Option<Pending>,
     pub subject: String,
     pub messages: Vec<Message>,
     pub expanded: Vec<bool>,
+}
+
+impl OpenThread {
+    /// Whether its original is still being built.
+    pub fn loading_original(&self) -> bool {
+        self.loading.is_some()
+    }
+}
+
+/// The original asked of the loader, and the generation its answer must
+/// carry to be used.
+struct Pending {
+    generation: u64,
+    message_id: String,
+}
+
+/// An original ready to show, from what was built.
+fn original_html(built: Built, message_id: &str, images: bool) -> OriginalHtml {
+    OriginalHtml {
+        message_id: message_id.to_owned(),
+        html: built.html,
+        images,
+        inline: built.inline,
+        missing: built.missing,
+    }
 }
 
 pub struct Picker {
@@ -326,6 +360,14 @@ pub struct Model {
     /// Messages whose inline pictures were asked of Gmail since Mail
     /// started, so a picture Gmail doesn't have isn't asked for again.
     inline_requested: HashSet<(i64, String)>,
+    /// Builds originals away from the window thread once started. `None`
+    /// builds them on the spot, as tests and screenshots do.
+    originals: Option<Loader>,
+    /// The last few originals built.
+    cache: originals::Cache,
+    /// Counts originals asked for, so an answer for a message no longer
+    /// open is told apart and dropped.
+    generation: u64,
 }
 
 impl Model {
@@ -355,6 +397,9 @@ impl Model {
             undo: None,
             viewed_since: None,
             inline_requested: HashSet::new(),
+            originals: None,
+            cache: originals::Cache::default(),
+            generation: 0,
         };
         model.reload()?;
         Ok(model)
@@ -783,10 +828,13 @@ impl Model {
                 .effects
                 .push(Effect::AddIcloudAccount { address, password }),
             Action::ToggleOriginal => {
+                // While it first loads, v still switches: the page shows
+                // once it is ready. If it turns out to read as text after
+                // all, the setting stays switched; that is rare enough.
                 if self
                     .open
                     .as_ref()
-                    .is_some_and(|open| open.original.is_some())
+                    .is_some_and(|open| open.original.is_some() || open.loading_original())
                 {
                     self.show_original = !self.show_original;
                     self.request_inline_images();
@@ -828,24 +876,24 @@ impl Model {
                 };
                 self.store
                     .save_inline_images(account_id, &message_id, &images)?;
-                // Put them in place if the message is still open.
-                let shown = self.open.as_ref().and_then(|open| {
-                    let original = open.original.as_ref()?;
-                    (open.account_id == account_id && original.message_id == message_id)
-                        .then_some(original.images)
+                // A kept copy lacks them, open or not.
+                self.cache.remove(account_id, &message_id);
+                // Put them in place if the message is still open, shown or
+                // read as text for now, or still loading: what that load
+                // read may be from before they were saved.
+                let open_here = self.open.as_ref().is_some_and(|open| {
+                    open.account_id == account_id
+                        && (open
+                            .original
+                            .as_ref()
+                            .is_some_and(|original| original.message_id == message_id)
+                            || open
+                                .loading
+                                .as_ref()
+                                .is_some_and(|pending| pending.message_id == message_id))
                 });
-                if let Some(remote_images) = shown
-                    && !images.is_empty()
-                {
-                    let original =
-                        self.original(account_id, &message_id)?
-                            .map(|original| OriginalHtml {
-                                images: remote_images,
-                                ..original
-                            });
-                    if let Some(open) = &mut self.open {
-                        open.original = original;
-                    }
+                if open_here && !images.is_empty() {
+                    self.start_original(account_id, message_id)?;
                 }
             }
             Action::ChoosePhoto | Action::UseGooglePhoto => {
@@ -1168,45 +1216,196 @@ impl Model {
             .enumerate()
             .map(|(index, message)| index == last || message.has_label("UNREAD"))
             .collect();
-        let original = match messages.as_slice() {
-            [message] if message.has_html => self.original(account, &message.gmail_id)?,
+        let original_id = match messages.as_slice() {
+            [message] if message.has_html => Some(message.gmail_id.clone()),
             _ => None,
         };
         self.open = Some(OpenThread {
             account_id: account,
-            original,
+            original: None,
+            loading: None,
             thread_id: summary.thread_id.clone(),
             subject: summary.subject.clone(),
             messages,
             expanded,
         });
+        if let Some(message_id) = original_id {
+            self.start_original(account, message_id)?;
+        }
         self.viewed_since = Some(Instant::now());
         self.request_inline_images();
         Ok(())
     }
 
-    /// A message's HTML with the pictures sent inside it that Mail has.
-    fn original(&self, account_id: i64, message_id: &str) -> anyhow::Result<Option<OriginalHtml>> {
-        let Some(html) = self.store.message_html(account_id, message_id)? else {
-            return Ok(None);
+    /// Builds originals on a thread of their own from now on, reading
+    /// `database` through a read-only connection. `wake` runs as each one is
+    /// ready. On an error originals keep being built on the spot.
+    pub fn start_original_loader(
+        &mut self,
+        database: &Path,
+        wake: impl Fn() + Send + 'static,
+    ) -> anyhow::Result<()> {
+        let store = Store::open_read_only(database)?;
+        self.originals = Some(Loader::start(store, wake)?);
+        Ok(())
+    }
+
+    /// Shows the open thread's original of `message_id`: at once when it
+    /// is kept, otherwise once the loader has built it, or built on the
+    /// spot when there is no loader.
+    fn start_original(&mut self, account_id: i64, message_id: String) -> anyhow::Result<()> {
+        self.generation += 1;
+        let generation = self.generation;
+        if self.open.is_none() {
+            return Ok(());
+        }
+        if let Some(built) = self.cache.get(account_id, &message_id) {
+            let images = self.images_for(&message_id);
+            if let Some(open) = &mut self.open {
+                open.original = Some(original_html(built, &message_id, images));
+                open.loading = None;
+            }
+            return Ok(());
+        }
+        if let Some(loader) = &self.originals {
+            let request = Request {
+                generation,
+                account_id,
+                message_id: message_id.clone(),
+            };
+            if loader.send(request).is_ok() {
+                if let Some(open) = &mut self.open {
+                    // The page on screen, if any, stays until the new one.
+                    open.loading = Some(Pending {
+                        generation,
+                        message_id,
+                    });
+                }
+                return Ok(());
+            }
+            // The loader has gone; build them here from now on.
+            self.originals = None;
+        }
+        self.build_original_now(account_id, &message_id)
+    }
+
+    /// Builds an original on the window thread, as Mail did before the
+    /// loader, and shows it.
+    fn build_original_now(&mut self, account_id: i64, message_id: &str) -> anyhow::Result<()> {
+        let built = originals::build(&self.store, account_id, message_id)?;
+        let images = self.images_for(message_id);
+        if let Some(built) = &built {
+            self.cache.insert(account_id, message_id, built.clone());
+        }
+        if let Some(open) = &mut self.open {
+            open.loading = None;
+            open.original = built.map(|built| original_html(built, message_id, images));
+        }
+        Ok(())
+    }
+
+    /// Whether a new page of `message_id` may load remote images: as the
+    /// one on screen did, or as Settings say for a message just opened.
+    fn images_for(&self, message_id: &str) -> bool {
+        self.open
+            .as_ref()
+            .and_then(|open| open.original.as_ref())
+            .filter(|original| original.message_id == message_id)
+            .map_or(self.remote_images, |original| original.images)
+    }
+
+    /// Shows the originals the loader has built. If it has gone, the one
+    /// still waiting is built here, and so is every one after it.
+    pub fn receive_originals(&mut self) {
+        loop {
+            let Some(loader) = &self.originals else {
+                return;
+            };
+            match loader.results.try_recv() {
+                Ok(loaded) => self.finish_original(loaded),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.originals = None;
+                    self.retry_pending_on_the_spot();
+                    return;
+                }
+            }
+        }
+    }
+
+    fn retry_pending_on_the_spot(&mut self) {
+        let Some(open) = &mut self.open else {
+            return;
         };
-        let wanted = inline::content_ids(&html);
-        let images = if wanted.is_empty() {
-            Vec::new()
-        } else {
-            self.store.inline_images(account_id, message_id)?
+        let Some(pending) = open.loading.take() else {
+            return;
         };
-        let missing = wanted
-            .into_iter()
-            .filter(|id| !images.iter().any(|image| image.content_id == *id))
-            .collect();
-        Ok(Some(OriginalHtml {
-            message_id: message_id.to_owned(),
-            html: inline::embed(&html, &images).into_owned(),
-            images: self.remote_images,
-            inline: images.len(),
-            missing,
-        }))
+        let account_id = open.account_id;
+        if let Err(error) = self.build_original_now(account_id, &pending.message_id) {
+            self.notify(format!("Could not show the original: {error:#}"));
+        }
+        self.request_inline_images();
+    }
+
+    /// Shows a built original if it is the one the open thread waits for.
+    /// Anything else answers a thread no longer open, or a page since
+    /// replaced, and is dropped without being kept.
+    fn finish_original(&mut self, loaded: Loaded) {
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        let current = open.account_id == loaded.account_id
+            && open.loading.as_ref().is_some_and(|pending| {
+                pending.generation == loaded.generation && pending.message_id == loaded.message_id
+            });
+        if !current {
+            return;
+        }
+        open.loading = None;
+        match loaded.built {
+            Ok(Some(built)) => {
+                let images = self.images_for(&loaded.message_id);
+                self.cache
+                    .insert(loaded.account_id, &loaded.message_id, built.clone());
+                if let Some(open) = &mut self.open {
+                    open.original = Some(original_html(built, &loaded.message_id, images));
+                }
+            }
+            // It reads as text, as it would have before.
+            Ok(None) => {}
+            Err(error) => self.notify(format!("Could not show the original: {error}")),
+        }
+        self.request_inline_images();
+    }
+
+    /// Waits for the loader's next answer and handles it. False when none
+    /// came in time.
+    #[cfg(test)]
+    pub(crate) fn receive_one_original(&mut self, timeout: Duration) -> bool {
+        let Some(loader) = &self.originals else {
+            return false;
+        };
+        match loader.results.recv_timeout(timeout) {
+            Ok(loaded) => {
+                self.finish_original(loaded);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Waits until the open thread's original is no longer loading. False
+    /// when it still is after `timeout`.
+    #[cfg(test)]
+    pub(crate) fn wait_for_original(&mut self, timeout: Duration) -> bool {
+        let until = Instant::now() + timeout;
+        while self.open.as_ref().is_some_and(OpenThread::loading_original) {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() || !self.receive_one_original(left) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Asks Gmail for the pictures the original on screen lacks, once.
@@ -1234,5 +1433,6 @@ impl Model {
     }
 }
 
+mod originals;
 #[cfg(test)]
 mod tests;

@@ -269,7 +269,7 @@ impl Shell {
             images: html.images,
             inline: html.inline,
         };
-        let shown = original.show(frame, ctx, rect, &page, || html.html.clone());
+        let shown = original.show(frame, ctx, rect, &page, || html.html.to_string());
         if let Err(error) = shown {
             // Fall back to text for good rather than try every frame.
             self.original = None;
