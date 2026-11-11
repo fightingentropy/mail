@@ -251,7 +251,13 @@ impl OpenThread {
 struct Pending {
     generation: u64,
     message_id: String,
+    /// v was pressed while there was no page yet. If none comes of it,
+    /// the setting goes back and the reader says it reads as text.
+    toggled: bool,
 }
+
+/// What v says on a message with no page to show.
+const READS_AS_TEXT: &str = "This one reads as text. h opens its HTML in your browser.";
 
 /// An original ready to show, from what was built.
 fn original_html(built: Built, message_id: &str, images: bool) -> OriginalHtml {
@@ -830,16 +836,16 @@ impl Model {
             Action::ToggleOriginal => {
                 // While it first loads, v still switches: the page shows
                 // once it is ready. If it turns out to read as text after
-                // all, the setting stays switched; that is rare enough.
-                if self
-                    .open
-                    .as_ref()
-                    .is_some_and(|open| open.original.is_some() || open.loading_original())
-                {
+                // all, the switch is undone then and the reader says so.
+                let open = self.open.as_mut();
+                if open.as_ref().is_some_and(|open| open.original.is_some()) {
                     self.show_original = !self.show_original;
                     self.request_inline_images();
+                } else if let Some(pending) = open.and_then(|open| open.loading.as_mut()) {
+                    pending.toggled = !pending.toggled;
+                    self.show_original = !self.show_original;
                 } else {
-                    self.notify("This one reads as text. h opens its HTML in your browser.".into());
+                    self.notify(READS_AS_TEXT.into());
                 }
             }
             Action::LoadImages => {
@@ -1276,9 +1282,11 @@ impl Model {
             if loader.send(request).is_ok() {
                 if let Some(open) = &mut self.open {
                     // The page on screen, if any, stays until the new one.
+                    let toggled = open.loading.as_ref().is_some_and(|pending| pending.toggled);
                     open.loading = Some(Pending {
                         generation,
                         message_id,
+                        toggled,
                     });
                 }
                 return Ok(());
@@ -1341,8 +1349,12 @@ impl Model {
             return;
         };
         let account_id = open.account_id;
-        if let Err(error) = self.build_original_now(account_id, &pending.message_id) {
-            self.notify(format!("Could not show the original: {error:#}"));
+        match self.build_original_now(account_id, &pending.message_id) {
+            Ok(()) => self.undo_early_toggle(pending.toggled, true),
+            Err(error) => {
+                self.undo_early_toggle(pending.toggled, false);
+                self.notify(format!("Could not show the original: {error:#}"));
+            }
         }
         self.request_inline_images();
     }
@@ -1361,7 +1373,7 @@ impl Model {
         if !current {
             return;
         }
-        open.loading = None;
+        let toggled = open.loading.take().is_some_and(|pending| pending.toggled);
         match loaded.built {
             Ok(Some(built)) => {
                 let images = self.images_for(&loaded.message_id);
@@ -1372,10 +1384,31 @@ impl Model {
                 }
             }
             // It reads as text, as it would have before.
-            Ok(None) => {}
-            Err(error) => self.notify(format!("Could not show the original: {error}")),
+            Ok(None) => self.undo_early_toggle(toggled, true),
+            Err(error) => {
+                self.undo_early_toggle(toggled, false);
+                self.notify(format!("Could not show the original: {error}"));
+            }
         }
         self.request_inline_images();
+    }
+
+    /// Puts the setting back when v was pressed before the first page
+    /// came and none did, as v does at once on a message with no page.
+    /// With `reads_as_text` the reader says so, as v would have.
+    fn undo_early_toggle(&mut self, toggled: bool, reads_as_text: bool) {
+        if !toggled
+            || self
+                .open
+                .as_ref()
+                .is_some_and(|open| open.original.is_some())
+        {
+            return;
+        }
+        self.show_original = !self.show_original;
+        if reads_as_text {
+            self.notify(READS_AS_TEXT.into());
+        }
     }
 
     /// Waits for the loader's next answer and handles it. False when none

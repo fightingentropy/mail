@@ -1218,3 +1218,63 @@ fn toggle_original_works_while_loading() {
     assert!(model.wait_for_original(WAIT));
     assert!(model.showing_original().is_some());
 }
+
+/// Answers the open thread's pending original with `built`, as the loader
+/// would.
+fn answer_pending(model: &mut Model, built: Result<Option<originals::Built>, String>) {
+    let open = model.open.as_ref().unwrap();
+    let pending = open.loading.as_ref().unwrap();
+    let loaded = originals::Loaded {
+        generation: pending.generation,
+        account_id: open.account_id,
+        message_id: pending.message_id.clone(),
+        built,
+    };
+    model.finish_original(loaded);
+}
+
+#[test]
+fn v_while_loading_is_undone_when_it_reads_as_text_after_all() {
+    let (mut model, _built, _release, _folder) = gated_model();
+    model.show_original = false;
+    open_receipt(&mut model);
+    assert!(model.open.as_ref().unwrap().loading_original());
+    model.apply(Action::ToggleOriginal).unwrap();
+    assert!(model.show_original);
+    assert_eq!(model.notice(), None);
+
+    answer_pending(&mut model, Ok(None));
+    assert!(!model.show_original, "the setting goes back");
+    assert_eq!(
+        model.notice(),
+        Some("This one reads as text. h opens its HTML in your browser.")
+    );
+}
+
+#[test]
+fn v_while_loading_is_undone_when_the_original_fails() {
+    let (mut model, _built, _release, _folder) = gated_model();
+    open_receipt(&mut model);
+    model.apply(Action::ToggleOriginal).unwrap();
+    assert!(!model.show_original);
+
+    answer_pending(&mut model, Err("disk on fire".into()));
+    assert!(model.show_original, "the setting goes back");
+    assert_eq!(
+        model.notice(),
+        Some("Could not show the original: disk on fire")
+    );
+}
+
+#[test]
+fn v_twice_while_loading_leaves_nothing_to_undo() {
+    let (mut model, _built, _release, _folder) = gated_model();
+    open_receipt(&mut model);
+    model.apply(Action::ToggleOriginal).unwrap();
+    model.apply(Action::ToggleOriginal).unwrap();
+    assert!(model.show_original);
+
+    answer_pending(&mut model, Ok(None));
+    assert!(model.show_original);
+    assert_eq!(model.notice(), None);
+}
