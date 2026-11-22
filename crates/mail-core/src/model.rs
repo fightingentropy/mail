@@ -141,6 +141,12 @@ pub struct Message {
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
     pub size_estimate: i64,
+    /// The `List-Unsubscribe` header as sent: how the sender takes an
+    /// unsubscribe request. Empty when the message has none; `None` for
+    /// mail stored before Mail kept it.
+    pub list_unsubscribe: Option<String>,
+    /// The sender takes the request in one POST (`List-Unsubscribe-Post`).
+    pub unsubscribe_one_click: bool,
     pub label_ids: Vec<String>,
     pub attachments: Vec<Attachment>,
 }

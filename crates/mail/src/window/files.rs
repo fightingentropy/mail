@@ -5,7 +5,7 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command, Stdio},
     thread,
 };
 
@@ -59,6 +59,57 @@ fn opens_safely(path: &Path) -> Opened {
         Opened::InApp
     } else {
         Opened::InFinder
+    }
+}
+
+/// Whether Quick Look may show a file of this name: the same documents,
+/// images and media that open after a download. Anything that could run
+/// code is left for Finder, where macOS's own checks apply.
+pub fn previews(filename: &str) -> bool {
+    opens_safely(Path::new(filename)) == Opened::InApp
+}
+
+/// Where previewed attachments are kept: a folder of Mail's own in the
+/// temporary folder, emptied when Mail starts and when it quits.
+pub fn preview_folder() -> PathBuf {
+    std::env::temp_dir().join("mail-preview")
+}
+
+/// The Quick Look panel showing previewed attachments, as Space shows a
+/// file in Finder. Only one is open at a time, and it closes with Mail.
+#[derive(Default)]
+pub struct QuickLook {
+    panel: Option<Child>,
+}
+
+impl QuickLook {
+    /// Shows `files`, in place of whatever the panel showed before.
+    pub fn show(&mut self, files: &[PathBuf]) -> anyhow::Result<()> {
+        self.close();
+        let panel = Command::new("qlmanage")
+            .arg("-p")
+            .args(files)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Could not open Quick Look")?;
+        self.panel = Some(panel);
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        if let Some(mut panel) = self.panel.take() {
+            let _ = panel.kill();
+            let _ = panel.wait();
+        }
+    }
+}
+
+impl Drop for QuickLook {
+    fn drop(&mut self) {
+        self.close();
+        let _ = fs::remove_dir_all(preview_folder());
     }
 }
 
@@ -155,6 +206,22 @@ mod tests {
         ] {
             assert_eq!(opens_safely(Path::new(name)), Opened::InFinder, "{name}");
         }
+    }
+
+    #[test]
+    fn quick_look_shows_only_what_opens_without_running_anything() {
+        assert!(previews("ticket.pdf"));
+        assert!(previews("Photo.HEIC"));
+        for name in [
+            "page.html",
+            "setup.pkg",
+            "archive.zip",
+            "run.command",
+            "noext",
+        ] {
+            assert!(!previews(name), "{name}");
+        }
+        assert!(preview_folder().ends_with("mail-preview"));
     }
 
     #[test]

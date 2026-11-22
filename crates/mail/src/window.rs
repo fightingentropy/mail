@@ -13,6 +13,7 @@ mod icloud_form;
 mod keys;
 mod links;
 mod original;
+mod palette;
 mod preferences;
 mod script;
 mod shortcuts;
@@ -20,6 +21,7 @@ mod state;
 mod theme;
 mod throttle;
 mod toast;
+mod unsubscribe;
 mod view;
 
 use std::{
@@ -104,9 +106,13 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
             if let Some(theme) = appearance {
                 creation.egui_ctx.set_theme(theme);
             }
+            // Whatever the last run left to preview is gone.
+            let _ = fs::remove_dir_all(files::preview_folder());
             let downloader = (!demo).then(|| {
                 let ctx = creation.egui_ctx.clone();
-                Downloader::start(paths.clone(), move || ctx.request_repaint())
+                Downloader::start(paths.clone(), files::preview_folder(), move || {
+                    ctx.request_repaint()
+                })
             });
             let syncer = (!demo).then(|| {
                 let ctx = creation.egui_ctx.clone();
@@ -116,6 +122,7 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
             let (sign_ins_done, sign_ins) = mpsc::channel();
             let (icloud_sign_ins_done, icloud_sign_ins) = mpsc::channel();
             let (photos_done, photos) = mpsc::channel();
+            let (unsubscribes_done, unsubscribes) = mpsc::channel();
             let status = if demo {
                 SyncStatus::Demo
             } else {
@@ -148,6 +155,9 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
                 icloud_sign_ins_done,
                 photos,
                 photos_done,
+                unsubscribes,
+                unsubscribes_done,
+                quick_look: files::QuickLook::default(),
                 downloader,
                 screenshot: screenshot.map(|path| Screenshot { path, frames: 0 }),
                 script,
@@ -185,6 +195,11 @@ struct Shell {
     /// saved, `None` if you cancelled, or the error.
     photos: Receiver<Result<Option<String>, String>>,
     photos_done: Sender<Result<Option<String>, String>>,
+    /// What came of reading unsubscribe headers and of sending requests.
+    unsubscribes: Receiver<unsubscribe::Finished>,
+    unsubscribes_done: Sender<unsubscribe::Finished>,
+    /// The Quick Look panel for attachments, when one is open.
+    quick_look: files::QuickLook,
     /// `None` in the demo, which has no Gmail to download from.
     downloader: Option<Downloader>,
     screenshot: Option<Screenshot>,
@@ -224,6 +239,7 @@ impl eframe::App for Shell {
         self.receive_downloads();
         self.receive_sign_ins();
         self.receive_photos();
+        self.receive_unsubscribes();
         self.model.receive_originals();
         if let Some(syncer) = &self.syncer
             && (std::mem::take(&mut self.model.wants_sync)
@@ -367,6 +383,28 @@ impl Shell {
         }
     }
 
+    /// Hands the model what was read about unsubscribing, and how requests
+    /// went.
+    fn receive_unsubscribes(&mut self) {
+        let finished: Vec<unsubscribe::Finished> = self.unsubscribes.try_iter().collect();
+        for result in finished {
+            self.apply(match result {
+                unsubscribe::Finished::Found {
+                    account_id,
+                    message_id,
+                    headers,
+                } => Action::UnsubscribeFound {
+                    account_id,
+                    message_id,
+                    headers,
+                },
+                unsubscribe::Finished::Done { sender, result } => {
+                    Action::Unsubscribed { sender, result }
+                }
+            });
+        }
+    }
+
     /// Picks up accounts signed in from the window, and syncs them. A failed
     /// iCloud sign-in shows in its form, if that is still open.
     fn receive_sign_ins(&mut self) {
@@ -436,6 +474,19 @@ impl Shell {
                 }
                 downloads::Event::Failed { filename, error } => {
                     format!("Could not download {filename}: {error}")
+                }
+                downloads::Event::Previewed { paths } => match self.quick_look.show(&paths) {
+                    Ok(()) => match paths.as_slice() {
+                        [path] => format!(
+                            "Previewing {}.",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ),
+                        _ => format!("Previewing {} files.", paths.len()),
+                    },
+                    Err(error) => format!("{error:#}"),
+                },
+                downloads::Event::PreviewFailed { error } => {
+                    format!("Could not load the preview: {error}")
                 }
                 downloads::Event::InlineImages {
                     account_id,
@@ -520,6 +571,59 @@ impl Shell {
                     }
                     None
                 }
+                Effect::Preview {
+                    account,
+                    message_id,
+                    attachments,
+                } => self.preview(account, message_id, attachments),
+                Effect::FindUnsubscribe {
+                    account,
+                    account_id,
+                    message_id,
+                } => {
+                    if self.demo {
+                        // Nothing to ask: the message's own words decide.
+                        self.apply(Action::UnsubscribeFound {
+                            account_id,
+                            message_id,
+                            headers: Ok(None),
+                        });
+                    } else {
+                        let wake = ctx.clone();
+                        unsubscribe::find(
+                            &self.paths,
+                            account,
+                            account_id,
+                            message_id,
+                            self.unsubscribes_done.clone(),
+                            move || wake.request_repaint(),
+                        );
+                    }
+                    None
+                }
+                Effect::Unsubscribe {
+                    account,
+                    sender,
+                    method,
+                } => {
+                    if self.demo {
+                        self.apply(Action::Unsubscribed {
+                            sender,
+                            result: Err("the demo mailbox sends nothing.".into()),
+                        });
+                    } else {
+                        let wake = ctx.clone();
+                        unsubscribe::request(
+                            &self.paths,
+                            account,
+                            sender,
+                            method,
+                            self.unsubscribes_done.clone(),
+                            move || wake.request_repaint(),
+                        );
+                    }
+                    None
+                }
                 Effect::OpenHtml { message_id, html } => {
                     Some(match files::open_html(&message_id, &html) {
                         Ok(_) => "Opened the HTML version in your browser.".to_owned(),
@@ -531,6 +635,29 @@ impl Shell {
                 self.model.notify(notice);
             }
         }
+    }
+
+    /// Queues the files Quick Look can show. Returns a notice.
+    fn preview(
+        &mut self,
+        account: String,
+        message_id: String,
+        attachments: Vec<mail_core::model::Attachment>,
+    ) -> Option<String> {
+        let Some(downloader) = &self.downloader else {
+            return Some("Previews aren't available in the demo.".to_owned());
+        };
+        let shown: Vec<_> = attachments
+            .into_iter()
+            .filter(|file| files::previews(&file.filename))
+            .collect();
+        if shown.is_empty() {
+            return Some(
+                "Quick Look can't show this kind of file. Click it to save it instead.".to_owned(),
+            );
+        }
+        downloader.preview(account, message_id, shown);
+        Some("Loading the preview…".to_owned())
     }
 
     fn save_draft(

@@ -7,12 +7,14 @@ use egui::{
     text::{CCursor, CCursorRange},
 };
 use mail_core::{
-    compose::{Draft, ReplyTo},
+    compose::{Draft, ReplyTo, split_address_list},
     model::Message,
+    store::Contact,
 };
 
 use super::{
     keys::{Bindable, Keymap},
+    state::Action,
     theme, view,
 };
 use crate::dates;
@@ -22,7 +24,37 @@ const READING_WIDTH: f32 = 760.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
     To,
+    Cc,
     Body,
+}
+
+/// How many people are suggested at once.
+const SUGGESTED: usize = 6;
+
+/// The people the recipient being typed could be, listed under its field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Suggestions {
+    pub field: Field,
+    pub people: Vec<Contact>,
+    pub highlighted: usize,
+}
+
+/// Where the recipient being typed starts in a To or Cc line: after the
+/// last comma between recipients, not one inside a quoted name.
+fn typing_from(list: &str) -> usize {
+    let mut quoted = false;
+    let mut angled = false;
+    let mut start = 0;
+    for (index, character) in list.char_indices() {
+        match character {
+            '"' => quoted = !quoted,
+            '<' if !quoted => angled = true,
+            '>' if !quoted => angled = false,
+            ',' | ';' if !quoted && !angled => start = index + 1,
+            _ => {}
+        }
+    }
+    start
 }
 
 /// One of your accounts, as the From line shows it.
@@ -53,6 +85,11 @@ pub struct Compose {
     send_pending: bool,
     /// Which field takes the cursor when the panel opens; the view takes it.
     pub focus: Option<Field>,
+    /// People to fill in for the recipient being typed, if any match.
+    pub suggestions: Option<Suggestions>,
+    /// A field whose cursor goes to its end, after a suggestion filled it
+    /// in; the view takes it.
+    pub cursor_to_end: Option<Field>,
 }
 
 impl Compose {
@@ -82,6 +119,78 @@ impl Compose {
             saving: None,
             send_pending: false,
             focus: Some(focus),
+            suggestions: None,
+            cursor_to_end: None,
+        }
+    }
+
+    /// Lists the people among `contacts` that the recipient being typed in
+    /// `field` could be, leaving out anyone already on the message.
+    pub fn suggest(&mut self, field: Field, contacts: &[Contact]) {
+        let list = match field {
+            Field::To => &self.to,
+            Field::Cc => &self.cc,
+            Field::Body => "",
+        };
+        let typed = list[typing_from(list)..].trim();
+        let taken: Vec<String> = [&self.to, &self.cc]
+            .into_iter()
+            .flat_map(|list| split_address_list(list))
+            .map(|entry| address_of(&entry))
+            .collect();
+        let people: Vec<Contact> = contacts
+            .iter()
+            .filter(|person| person.matches(typed))
+            .filter(|person| !taken.contains(&person.address.to_lowercase()))
+            .take(SUGGESTED)
+            .cloned()
+            .collect();
+        self.suggestions = (!people.is_empty()).then_some(Suggestions {
+            field,
+            people,
+            highlighted: 0,
+        });
+    }
+
+    pub fn move_suggestion(&mut self, step: isize) {
+        if let Some(suggestions) = &mut self.suggestions {
+            let last = suggestions.people.len() as isize - 1;
+            let next = suggestions.highlighted as isize + step;
+            suggestions.highlighted = next.clamp(0, last.max(0)) as usize;
+        }
+    }
+
+    /// Puts the highlighted person, or the one at `index`, in place of what
+    /// was typed, ready for the next recipient.
+    pub fn accept_suggestion(&mut self, index: Option<usize>) {
+        let Some(suggestions) = self.suggestions.take() else {
+            return;
+        };
+        let Some(person) = suggestions
+            .people
+            .get(index.unwrap_or(suggestions.highlighted))
+        else {
+            return;
+        };
+        let list = match suggestions.field {
+            Field::To => &mut self.to,
+            Field::Cc => &mut self.cc,
+            Field::Body => return,
+        };
+        list.truncate(typing_from(list));
+        if !list.is_empty() {
+            list.push(' ');
+        }
+        list.push_str(&person.recipient());
+        list.push_str(", ");
+        self.cursor_to_end = Some(suggestions.field);
+        self.focus = Some(suggestions.field);
+    }
+
+    /// Esc: the list goes and typing carries on in the same field.
+    pub fn dismiss_suggestions(&mut self) {
+        if let Some(suggestions) = self.suggestions.take() {
+            self.focus = Some(suggestions.field);
         }
     }
 
@@ -160,18 +269,29 @@ impl Compose {
     }
 }
 
+/// The address in one recipient, lowercase: `ana@example.org` from
+/// `Ana <Ana@Example.org>`.
+fn address_of(entry: &str) -> String {
+    let address = match (entry.rfind('<'), entry.rfind('>')) {
+        (Some(open), Some(close)) if open < close => &entry[open + 1..close],
+        _ => entry,
+    };
+    address.trim().to_lowercase()
+}
+
 /// Draws the panel. Typing goes straight into the fields; shortcuts are
 /// handled in `keys.rs`, and the footer shows the ones in effect. With more
 /// than one account a From line shows which writes, and a new message can
-/// change it. Returns the account picked there.
+/// change it. To and Cc list the people in your mail that match what is
+/// typed; `keys.rs` reads the keys that choose one.
 pub fn draw(
     ui: &mut egui::Ui,
     compose: &mut Compose,
     keymap: &Keymap,
     accounts: &[FromAccount],
-) -> Option<String> {
+    actions: &mut Vec<Action>,
+) {
     let palette = theme::palette(ui.ctx());
-    let mut picked = None;
     let side = ((ui.available_width() - READING_WIDTH) / 2.0).clamp(36.0, 120.0) as i8;
     egui::Frame::new()
         .inner_margin(Margin {
@@ -184,16 +304,15 @@ pub fn draw(
             ui.set_max_width(ui.available_width().min(READING_WIDTH));
             ui.label(RichText::new(compose.title).font(theme::semibold(22.0)));
             ui.add_space(14.0);
-            if accounts.len() > 1 {
-                picked = from_field(ui, compose, accounts, palette);
+            if accounts.len() > 1
+                && let Some(address) = from_field(ui, compose, accounts, palette)
+            {
+                actions.push(Action::SetFrom(address));
             }
 
             let focus = compose.focus.take();
-            let to = field(ui, "To", &mut compose.to, palette);
-            if focus == Some(Field::To) {
-                to.request_focus();
-            }
-            field(ui, "Cc", &mut compose.cc, palette);
+            recipients(ui, compose, Field::To, focus, actions);
+            recipients(ui, compose, Field::Cc, focus, actions);
             field(ui, "Subject", &mut compose.subject, palette);
             ui.add_space(10.0);
 
@@ -247,7 +366,160 @@ pub fn draw(
                 });
             });
         });
-    picked
+}
+
+/// The To or Cc line, with the people that match what is being typed
+/// listed under it.
+fn recipients(
+    ui: &mut egui::Ui,
+    compose: &mut Compose,
+    which: Field,
+    focus: Option<Field>,
+    actions: &mut Vec<Action>,
+) {
+    let palette = theme::palette(ui.ctx());
+    let listed = compose
+        .suggestions
+        .as_ref()
+        .is_some_and(|suggestions| suggestions.field == which);
+    let (label, text) = match which {
+        Field::To => ("To", &mut compose.to),
+        _ => ("Cc", &mut compose.cc),
+    };
+    let id = ui.id().with(("compose-recipients", label));
+    let response = ui
+        .horizontal(|ui| {
+            ui.add_sized(
+                [72.0, 32.0],
+                egui::Label::new(
+                    RichText::new(label)
+                        .font(theme::regular(14.5))
+                        .color(palette.dim),
+                ),
+            );
+            ui.add(
+                TextEdit::singleline(text)
+                    .id(id)
+                    .font(theme::regular(15.5))
+                    .margin(Vec2::new(10.0, 7.0))
+                    .desired_width(f32::INFINITY)
+                    // Tab chooses a suggestion while they are listed, and
+                    // moves to the next field otherwise.
+                    .lock_focus(listed),
+            )
+        })
+        .inner;
+    if focus == Some(which) {
+        response.request_focus();
+    }
+    if compose.cursor_to_end == Some(which)
+        && let Some(mut state) = TextEdit::load_state(ui.ctx(), id)
+    {
+        compose.cursor_to_end = None;
+        let end = CCursor::new(text.chars().count());
+        state.cursor.set_char_range(Some(CCursorRange::one(end)));
+        state.store(ui.ctx(), id);
+    }
+    if response.changed() {
+        actions.push(Action::SuggestRecipients(which));
+    }
+    if !listed {
+        return;
+    }
+    let over_list = compose
+        .suggestions
+        .as_ref()
+        .is_some_and(|suggestions| suggestion_list(ui, &response, suggestions, actions));
+    // Leaving the field closes the list, unless the click chose from it.
+    // Esc takes the cursor out of the field too, but that is the model's to
+    // answer: it closes the list and puts the cursor back.
+    let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    if !response.has_focus() && !over_list && !escaped && focus != Some(which) {
+        compose.suggestions = None;
+    }
+}
+
+/// The suggested people under a field, the highlighted one marked. A press
+/// on one fills it in. Returns whether the pointer is over the list.
+fn suggestion_list(
+    ui: &egui::Ui,
+    field: &egui::Response,
+    suggestions: &Suggestions,
+    actions: &mut Vec<Action>,
+) -> bool {
+    let palette = theme::palette(ui.ctx());
+    let width = field.rect.width();
+    let area = egui::Area::new(ui.id().with("recipient-suggestions"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(field.rect.left_bottom() + Vec2::new(0.0, 4.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(palette.overlay)
+                .stroke(Stroke::new(1.0, palette.divider))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(Margin::same(5))
+                .shadow(egui::Shadow {
+                    offset: [0, 4],
+                    blur: 16,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha(60),
+                })
+                .show(ui, |ui| {
+                    ui.set_width(width - 10.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for (index, person) in suggestions.people.iter().enumerate() {
+                        let highlighted = index == suggestions.highlighted;
+                        if suggestion_row(ui, person, highlighted) {
+                            actions.push(Action::AcceptSuggestion(Some(index)));
+                        }
+                    }
+                });
+        });
+    area.response.contains_pointer()
+}
+
+/// One suggested person: their name, then their address. Returns true when
+/// pressed.
+fn suggestion_row(ui: &mut egui::Ui, person: &Contact, highlighted: bool) -> bool {
+    let palette = theme::palette(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+    if highlighted {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), palette.selected);
+    } else if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), palette.hover);
+    }
+    let mut job = egui::text::LayoutJob::default();
+    let simple = egui::text::TextFormat::simple;
+    if !person.name.is_empty() {
+        job.append(&person.name, 0.0, simple(theme::medium(14.5), palette.text));
+        job.append("   ", 0.0, simple(theme::regular(14.5), palette.text));
+    }
+    let address_color = if person.name.is_empty() {
+        palette.text
+    } else {
+        palette.secondary
+    };
+    job.append(
+        &person.address,
+        0.0,
+        simple(theme::regular(14.0), address_color),
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: rect.width() - 20.0,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = ui.painter().layout_job(job);
+    let at = Pos2::new(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(at, galley, palette.text);
+    // On the press, before the field's loss of focus closes the list.
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .is_pointer_button_down_on()
 }
 
 /// The From line: the account's photo and address, which open a menu of

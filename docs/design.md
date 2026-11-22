@@ -425,7 +425,11 @@ Rules:
    rebuilds; `--link-cli` points `~/.cargo/bin/mail` at the app's binary so
    the terminal shares that identity; `--notarize <profile>` submits,
    staples and checks the app with Gatekeeper. The icon is drawn in code
-   (`examples/render_icon.rs`). Still to do: a GitHub release workflow.
+   (`examples/render_icon.rs`). *Releases:* pushing a tag such as `v0.2.0`
+   runs `.github/workflows/release.yml`, which checks the tag against
+   `Cargo.toml`, runs the tests, builds the app with the same script and
+   publishes it zipped with its SHA-256. The runner has no Developer ID, so
+   that build is signed ad hoc and not notarized.
    Done early: *attachments on demand*, fetched with
    `messages.attachments.get` (20 quota units) on a worker thread and saved
    to Downloads under a name that never replaces a file. Gmail can retire an
@@ -436,6 +440,54 @@ Rules:
    blocks scripts, frames and forms, and opens it in the browser. Remote
    images load there, so the sender learns the message was opened; the
    reader itself never loads anything.
+
+5. **Borrowed ideas.** *Done.* Five features follow ideas in
+   [Exo](https://github.com/m1guelpf/Exo), another Rust and egui Gmail
+   client; each is written here from scratch.
+
+   *Tracking pixels* (`gmail::trackers`): before an original is shown, or
+   opened in the browser with `h`, remote `<img>` tags are dropped when
+   they can't be seen (width and height of one pixel or less, by attribute
+   or inline style, or `display: none` or `visibility: hidden`) or when
+   their address is a known open-tracking endpoint. `cid:` and `data:`
+   images are never touched. Only `<img>` is looked at: a tracker loaded as
+   a CSS background still loads with remote images on.
+
+   *Unsubscribe* (`unsubscribe`): migration 8 stores each message's
+   `List-Unsubscribe` header and whether `List-Unsubscribe-Post` offers one
+   click (RFC 8058); sync asks Gmail for both with the headers it already
+   reads. NULL means mail stored earlier: the window reads that message's
+   headers once (20 quota units) and saves them. The best way wins: one
+   HTTPS POST, else an email from your account, else the page in your
+   browser; without headers, a link in the body that says "unsubscribe".
+   The header is the sender's, so a confirmation names the host or address
+   first, the POST goes only to a public HTTPS host (no IP address, no
+   `user@`, nothing local), carries no cookies and follows no redirect, and
+   an email request can't put a line break in a header. Checked against a
+   public echo service: 200 succeeds, 302 and 404 are reported.
+
+   *Quoted replies* (`quotes`): the text reader folds a reply from its
+   "On … wrote:" line (in seven languages, wrapped over up to three lines),
+   Outlook's From, Sent and Subject block, or two or more `>` lines at the
+   end. It folds only when everything after is the quote: marked and
+   unmarked lines together mean a reply written between the quoted lines,
+   which stays whole, as does a forward. Where each quote starts is worked
+   out once when a thread opens, not on every frame.
+
+   *Recipient suggestions* (`store::contacts`): the list is made from
+   stored mail when the first letter of a recipient is typed: people you
+   wrote to first, then people who wrote to you, automated senders left
+   out. No People API and no new permission.
+
+   *Command palette* (`window/palette.rs`): entries run the same `Command`
+   a shortcut would, so the palette adds no abilities of its own. Ranking
+   is the start of the name, the start of a word, the words' first
+   letters, anywhere in a word, then the letters in order.
+
+   Also *Quick Look* for attachments: `⌘Y` downloads the files to a
+   temporary folder and shows them with `qlmanage -p`, for the same types
+   that open after a download; the folder is emptied when Mail starts and
+   quits.
 
 ## Performance
 

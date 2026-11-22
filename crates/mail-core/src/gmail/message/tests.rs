@@ -258,3 +258,33 @@ fn pictures_the_html_shows_are_marked() {
         ]
     );
 }
+
+#[test]
+fn how_to_unsubscribe_comes_from_the_headers() {
+    let newsletter = parse_message(api(json!({
+        "id": "n1",
+        "threadId": "n1",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [
+                {"name": "list-unsubscribe", "value": "<https://news.example/u/1>, <mailto:leave@news.example>"},
+                {"name": "List-Unsubscribe-Post", "value": "List-Unsubscribe=One-Click"}
+            ],
+            "body": {"size": 2, "data": b64("Hi")}
+        }
+    })));
+    assert_eq!(
+        newsletter.list_unsubscribe.as_deref(),
+        Some("<https://news.example/u/1>, <mailto:leave@news.example>")
+    );
+    assert!(newsletter.unsubscribe_one_click);
+
+    // A letter has none, which is known rather than unknown.
+    let letter = parse_message(api(json!({
+        "id": "l1",
+        "threadId": "l1",
+        "payload": {"mimeType": "text/plain", "headers": [], "body": {"size": 0}}
+    })));
+    assert_eq!(letter.list_unsubscribe.as_deref(), Some(""));
+    assert!(!letter.unsubscribe_one_click);
+}

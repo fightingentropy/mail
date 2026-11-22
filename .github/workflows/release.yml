@@ -1,0 +1,70 @@
+name: Release
+
+# Pushing a tag such as v0.2.0 builds Mail.app and publishes it as a GitHub
+# release. The tag must match the version in Cargo.toml.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: Build and publish Mail.app
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+      - name: The tag is the version in Cargo.toml
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml's version $version." >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Tests
+        run: cargo test --locked --workspace
+      # No Developer ID is on the runner, so the script signs ad hoc.
+      - name: Build Mail.app
+        run: packaging/macos/build-app.sh
+      - name: Window smoke test
+        timeout-minutes: 3
+        run: |
+          dist/Mail.app/Contents/MacOS/mail --demo --screenshot "$RUNNER_TEMP/window.png"
+          test -s "$RUNNER_TEMP/window.png"
+      - name: Archive
+        run: |
+          archive="Mail-$VERSION-arm64.zip"
+          # ditto keeps the signature and the bundle's attributes; zip doesn't.
+          ditto -c -k --keepParent dist/Mail.app "$archive"
+          shasum -a 256 "$archive" > "$archive.sha256"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<'EOF'
+          Mail.app for Apple Silicon Macs (macOS 13 or later).
+
+          This build is not notarized, so macOS won't open it on a double
+          click the first time: right-click Mail.app, choose Open, then Open
+          again. Or build it yourself with `packaging/macos/build-app.sh`,
+          which signs with your own Developer ID when you have one.
+          EOF
+          gh release create "$GITHUB_REF_NAME" "$ARCHIVE" "$ARCHIVE.sha256" \
+            --title "Mail $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --generate-notes

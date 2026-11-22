@@ -1278,3 +1278,617 @@ fn v_twice_while_loading_leaves_nothing_to_undo() {
     assert!(model.show_original);
     assert_eq!(model.notice(), None);
 }
+
+/// Stores a message in the first account, newest of all, and opens it.
+fn open_new(model: &mut Model, message: Message) -> i64 {
+    let account = model.accounts[0].id;
+    let subject = message.subject.clone();
+    let message = Message {
+        internal_date: i64::MAX / 2,
+        label_ids: vec!["INBOX".into()],
+        ..message
+    };
+    model.store.save_messages(account, &[message]).unwrap();
+    model.reload().unwrap();
+    select(model, &subject);
+    account
+}
+
+#[test]
+fn tracking_pixels_are_taken_out_of_an_original_and_counted() {
+    let (mut model, _folder) = model();
+    open_new(
+        &mut model,
+        Message {
+            gmail_id: "promo".into(),
+            thread_id: "promo".into(),
+            subject: "Sale".into(),
+            from_addr: "news@shop.example".into(),
+            body_text: "Sale now on.".into(),
+            body_html: Some(
+                concat!(
+                    r#"<p>Sale now on.</p><img src="https://shop.example/banner.png" width="600">"#,
+                    r#"<img src="https://shop.example/o?u=7" width="1" height="1">"#,
+                    r#"<img src="https://x.list-manage.com/track/open.php?u=1">"#,
+                )
+                .into(),
+            ),
+            ..Message::default()
+        },
+    );
+    let original = model.showing_original().unwrap();
+    assert_eq!(original.trackers, 2);
+    assert!(original.html.contains("banner.png"));
+    assert!(!original.html.contains("shop.example/o?u=7"));
+    assert!(!original.html.contains("list-manage"));
+
+    // The browser loads remote images too, so h leaves them out as well.
+    model.apply(Action::OpenHtml).unwrap();
+    let [Effect::OpenHtml { html, .. }] = model.effects.as_slice() else {
+        panic!("expected HTML, got {:?}", model.effects);
+    };
+    assert!(html.contains("banner.png") && !html.contains("list-manage"));
+
+    // The demo newsletter carries one.
+    select(
+        &mut model,
+        "This week: async traits, SQLite tips and egui 0.36",
+    );
+    assert_eq!(model.showing_original().unwrap().trackers, 1);
+}
+
+#[test]
+fn a_reply_folds_the_message_it_quotes_until_asked() {
+    let (mut model, _folder) = model();
+    select(&mut model, "Code review: offline queue for triage");
+    let open = model.open.as_ref().unwrap();
+    assert_eq!(open.quoted_from.len(), 3);
+    assert_eq!(
+        open.quoted_from[0], None,
+        "the first message quotes nothing"
+    );
+    let last = &open.messages[2];
+    let from = open.quoted_from[2].expect("the last reply quotes the one before");
+    assert_eq!(
+        last.body_text[..from].trim_end(),
+        "Works for me. Approved. Ship it."
+    );
+    assert!(last.body_text[from..].starts_with("On Thu, 12 Nov 2026"));
+    assert_eq!(open.quotes_shown, [false, false, false]);
+
+    model.apply(Action::ToggleQuoted(2)).unwrap();
+    assert_eq!(
+        model.open.as_ref().unwrap().quotes_shown,
+        [false, false, true]
+    );
+    // Sync reloading the same thread keeps what was unfolded.
+    model.reload().unwrap();
+    assert_eq!(
+        model.open.as_ref().unwrap().quotes_shown,
+        [false, false, true]
+    );
+    model.apply(Action::ToggleQuoted(2)).unwrap();
+    model.apply(Action::ToggleQuoted(9)).unwrap();
+    assert_eq!(
+        model.open.as_ref().unwrap().quotes_shown,
+        [false, false, false]
+    );
+}
+
+#[test]
+fn a_reply_quotes_the_whole_message_even_when_it_was_folded() {
+    let (mut model, _folder) = model();
+    select(&mut model, "Code review: offline queue for triage");
+    model.apply(Action::Reply).unwrap();
+    let body = &model.compose.as_ref().unwrap().body;
+    assert!(body.contains("> Works for me. Approved. Ship it."));
+    assert!(body.contains("> > Good question."));
+}
+
+fn confirming(model: &Model) -> &UnsubscribeSummary {
+    model.confirm_unsubscribe.as_ref().expect("a confirmation")
+}
+
+#[test]
+fn unsubscribing_from_a_list_asks_first_then_sends_one_request() {
+    let (mut model, _folder) = model();
+    select(
+        &mut model,
+        "This week: async traits, SQLite tips and egui 0.36",
+    );
+    assert!(model.open.as_ref().unwrap().unsubscribe.is_some());
+    model.apply(Action::Unsubscribe).unwrap();
+    assert!(model.effects.is_empty(), "nothing goes before you confirm");
+    let summary = confirming(&model);
+    assert_eq!(summary.sender, "Rust Weekly");
+    assert_eq!(summary.account, demo::ADDRESS);
+    assert_eq!(
+        summary.method,
+        Method::OneClick("https://rustweekly.example/leave/demo".into())
+    );
+    assert_eq!(summary.method.destination(), "rustweekly.example");
+
+    model.apply(Action::CancelUnsubscribe).unwrap();
+    assert!(model.confirm_unsubscribe.is_none());
+    assert!(model.effects.is_empty());
+
+    model.apply(Action::Unsubscribe).unwrap();
+    model.apply(Action::ConfirmUnsubscribe).unwrap();
+    assert!(model.confirm_unsubscribe.is_none());
+    let [
+        Effect::Unsubscribe {
+            account,
+            sender,
+            method,
+        },
+    ] = model.effects.as_slice()
+    else {
+        panic!("expected one request, got {:?}", model.effects);
+    };
+    assert_eq!(
+        (account.as_str(), sender.as_str()),
+        (demo::ADDRESS, "Rust Weekly")
+    );
+    assert!(matches!(method, Method::OneClick(_)));
+    assert_eq!(model.notice(), Some("Unsubscribing…"));
+    // Confirming again has nothing left to confirm.
+    model.apply(Action::ConfirmUnsubscribe).unwrap();
+    assert_eq!(model.effects.len(), 1);
+
+    model
+        .apply(Action::Unsubscribed {
+            sender: "Rust Weekly".into(),
+            result: Ok(()),
+        })
+        .unwrap();
+    assert_eq!(model.notice(), Some("Unsubscribed from Rust Weekly."));
+    assert!(model.wants_sync);
+    model
+        .apply(Action::Unsubscribed {
+            sender: "Rust Weekly".into(),
+            result: Err("Their server answered 500".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        model.notice(),
+        Some("Could not unsubscribe: Their server answered 500")
+    );
+}
+
+#[test]
+fn mail_stored_before_the_headers_were_kept_is_asked_of_the_mailbox() {
+    let (mut model, _folder) = model();
+    // The rail ticket says nothing about lists, and its headers are unknown.
+    select(&mut model, "Your e-ticket: London to Edinburgh");
+    assert!(model.open.as_ref().unwrap().unsubscribe.is_none());
+    model.apply(Action::Unsubscribe).unwrap();
+    assert!(model.confirm_unsubscribe.is_none());
+    let [
+        Effect::FindUnsubscribe {
+            account,
+            account_id,
+            message_id,
+        },
+    ] = model.effects.as_slice()
+    else {
+        panic!("expected a lookup, got {:?}", model.effects);
+    };
+    assert_eq!(account, demo::ADDRESS);
+    let (account_id, message_id) = (*account_id, message_id.clone());
+    assert_eq!(model.notice(), Some("Checking how to unsubscribe…"));
+    model.effects.clear();
+
+    model
+        .apply(Action::UnsubscribeFound {
+            account_id,
+            message_id: message_id.clone(),
+            headers: Ok(Some((
+                "<mailto:leave@northline.example?subject=stop>".into(),
+                false,
+            ))),
+        })
+        .unwrap();
+    assert_eq!(model.notice(), None, "the confirmation replaces the toast");
+    let summary = confirming(&model);
+    assert_eq!(summary.sender, "Northline Rail");
+    assert_eq!(summary.method.destination(), "leave@northline.example");
+    // Kept: the reader offers it now, and the next time needs no lookup.
+    assert!(model.open.as_ref().unwrap().unsubscribe.is_some());
+    let stored = model
+        .store
+        .message(account_id, &message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.list_unsubscribe.as_deref(),
+        Some("<mailto:leave@northline.example?subject=stop>")
+    );
+    model.apply(Action::CancelUnsubscribe).unwrap();
+    model.apply(Action::Next).unwrap();
+    model.apply(Action::Previous).unwrap();
+    model.apply(Action::Unsubscribe).unwrap();
+    assert!(model.effects.is_empty());
+    assert!(matches!(confirming(&model).method, Method::Email(_)));
+
+    // An email request goes from the account the mail came to.
+    model.apply(Action::ConfirmUnsubscribe).unwrap();
+    assert!(matches!(
+        model.effects.as_slice(),
+        [Effect::Unsubscribe { account, method: Method::Email(_), .. }] if account == demo::ADDRESS
+    ));
+}
+
+#[test]
+fn an_answer_for_a_message_no_longer_on_screen_asks_nothing() {
+    let (mut model, _folder) = model();
+    select(&mut model, "Your e-ticket: London to Edinburgh");
+    model.apply(Action::Unsubscribe).unwrap();
+    let Some(Effect::FindUnsubscribe {
+        account_id,
+        message_id,
+        ..
+    }) = model.effects.pop()
+    else {
+        panic!("expected a lookup");
+    };
+    model.apply(Action::Next).unwrap();
+    model
+        .apply(Action::UnsubscribeFound {
+            account_id,
+            message_id: message_id.clone(),
+            headers: Ok(Some(("<https://northline.example/u>".into(), true))),
+        })
+        .unwrap();
+    assert!(model.confirm_unsubscribe.is_none());
+    assert_eq!(model.notice(), None);
+    // What was learned is still kept.
+    let stored = model
+        .store
+        .message(account_id, &message_id)
+        .unwrap()
+        .unwrap();
+    assert!(stored.unsubscribe_one_click);
+}
+
+#[test]
+fn without_headers_the_messages_own_unsubscribe_link_is_the_way() {
+    let (mut model, _folder) = model();
+    let account = open_new(
+        &mut model,
+        Message {
+            gmail_id: "digest".into(),
+            thread_id: "digest".into(),
+            subject: "Weekly digest".into(),
+            from_addr: "digest@forum.example".into(),
+            body_text: "New posts this week.\nUnsubscribe: https://forum.example/leave?u=7".into(),
+            ..Message::default()
+        },
+    );
+    // Its own words link to a page, so the reader offers it at once.
+    assert_eq!(
+        model.open.as_ref().unwrap().unsubscribe,
+        Some(Method::Page("https://forum.example/leave?u=7".into()))
+    );
+    model.apply(Action::Unsubscribe).unwrap();
+    // Headers unknown: the mailbox is asked, and can't be reached.
+    assert!(matches!(
+        model.effects.pop(),
+        Some(Effect::FindUnsubscribe { .. })
+    ));
+    model
+        .apply(Action::UnsubscribeFound {
+            account_id: account,
+            message_id: "digest".into(),
+            headers: Err("offline".into()),
+        })
+        .unwrap();
+    assert_eq!(confirming(&model).sender, "digest@forum.example");
+    model.apply(Action::ConfirmUnsubscribe).unwrap();
+    assert_eq!(
+        model.effects,
+        [Effect::OpenLink("https://forum.example/leave?u=7".into())]
+    );
+    assert_eq!(
+        model.notice(),
+        Some("Opened their unsubscribe page in your browser.")
+    );
+}
+
+#[test]
+fn a_letter_gives_no_way_to_unsubscribe() {
+    let (mut model, _folder) = model();
+    model.apply(Action::Unsubscribe).unwrap();
+    let Some(Effect::FindUnsubscribe {
+        account_id,
+        message_id,
+        ..
+    }) = model.effects.pop()
+    else {
+        panic!("expected a lookup");
+    };
+    model
+        .apply(Action::UnsubscribeFound {
+            account_id,
+            message_id: message_id.clone(),
+            headers: Ok(Some((String::new(), false))),
+        })
+        .unwrap();
+    assert!(model.confirm_unsubscribe.is_none());
+    assert_eq!(
+        model.notice(),
+        Some("This sender gives no way to unsubscribe.")
+    );
+    // Known now, so asking again says so at once.
+    model.apply(Action::Unsubscribe).unwrap();
+    assert!(model.effects.is_empty());
+
+    // With no answer and no link, it says why it couldn't tell.
+    select(&mut model, "Dinner Friday?");
+    model.apply(Action::Unsubscribe).unwrap();
+    let Some(Effect::FindUnsubscribe {
+        account_id,
+        message_id,
+        ..
+    }) = model.effects.pop()
+    else {
+        panic!("expected a lookup");
+    };
+    model
+        .apply(Action::UnsubscribeFound {
+            account_id,
+            message_id,
+            headers: Err("offline".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        model.notice(),
+        Some("Could not check how to unsubscribe: offline")
+    );
+}
+
+#[test]
+fn your_own_mail_is_not_something_to_unsubscribe_from() {
+    let (mut model, _folder) = model();
+    model.apply(Action::Show("SENT".into())).unwrap();
+    // The thread has mail from Sam too; a thread of only yours has none.
+    let account = model.accounts[0].id;
+    let mine = Message {
+        gmail_id: "mine".into(),
+        thread_id: "mine".into(),
+        internal_date: i64::MAX / 2,
+        subject: "Note to self".into(),
+        from_addr: demo::ADDRESS.into(),
+        label_ids: vec!["SENT".into()],
+        ..Message::default()
+    };
+    model.store.save_messages(account, &[mine]).unwrap();
+    model.reload().unwrap();
+    select(&mut model, "Note to self");
+    model.apply(Action::Unsubscribe).unwrap();
+    assert!(model.effects.is_empty());
+    assert_eq!(model.notice(), Some("Nothing to unsubscribe from here."));
+}
+
+fn suggested(model: &Model) -> Vec<&str> {
+    model
+        .compose
+        .as_ref()
+        .and_then(|compose| compose.suggestions.as_ref())
+        .map(|suggestions| {
+            suggestions
+                .people
+                .iter()
+                .map(|person| person.address.as_str())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn type_to(model: &mut Model, text: &str) {
+    model.compose.as_mut().unwrap().to = text.into();
+    model.apply(Action::SuggestRecipients(Field::To)).unwrap();
+}
+
+#[test]
+fn typing_a_recipient_suggests_people_from_your_mail() {
+    let (mut model, _folder) = model();
+    model.apply(Action::NewMessage).unwrap();
+    type_to(&mut model, "sa");
+    // Sam, whom you have written to; nobody else starts with "sa".
+    assert_eq!(suggested(&model), ["sam@buildkite.test"]);
+    type_to(&mut model, "xyz");
+    assert!(suggested(&model).is_empty());
+    assert!(model.compose.as_ref().unwrap().suggestions.is_none());
+
+    // A name's later word, an address or its site all find someone.
+    type_to(&mut model, "okaf");
+    assert_eq!(suggested(&model), ["sam@buildkite.test"]);
+    type_to(&mut model, "fastmail");
+    assert_eq!(suggested(&model), ["maya@fastmail.test"]);
+    // Yourself is never suggested, nor is anyone until a letter is typed.
+    type_to(&mut model, "you@");
+    assert!(suggested(&model).is_empty());
+    type_to(&mut model, "");
+    assert!(suggested(&model).is_empty());
+}
+
+#[test]
+fn choosing_a_suggestion_fills_it_in_ready_for_the_next() {
+    let (mut model, _folder) = model();
+    model.apply(Action::NewMessage).unwrap();
+    type_to(&mut model, "l");
+    let people = suggested(&model).len();
+    assert!(people >= 2, "several match l: {:?}", suggested(&model));
+    // The highlight stops at both ends.
+    model.apply(Action::MoveSuggestion(-1)).unwrap();
+    let highlighted = |model: &Model| {
+        model
+            .compose
+            .as_ref()
+            .unwrap()
+            .suggestions
+            .as_ref()
+            .unwrap()
+            .highlighted
+    };
+    assert_eq!(highlighted(&model), 0);
+    for _ in 0..20 {
+        model.apply(Action::MoveSuggestion(1)).unwrap();
+    }
+    assert_eq!(highlighted(&model), people - 1);
+
+    type_to(&mut model, "may");
+    model.apply(Action::AcceptSuggestion(None)).unwrap();
+    let compose = model.compose.as_mut().unwrap();
+    assert_eq!(compose.to, "Maya Chen <maya@fastmail.test>, ");
+    assert!(compose.suggestions.is_none());
+    assert_eq!(compose.cursor_to_end, Some(Field::To));
+    assert_eq!(compose.focus, Some(Field::To));
+
+    // The next recipient starts after the comma; Maya isn't offered twice.
+    compose.to.push_str("ma");
+    model.apply(Action::SuggestRecipients(Field::To)).unwrap();
+    assert!(!suggested(&model).contains(&"maya@fastmail.test"));
+    type_to(&mut model, "Maya Chen <maya@fastmail.test>, sam");
+    model.apply(Action::AcceptSuggestion(Some(0))).unwrap();
+    let compose = model.compose.as_ref().unwrap();
+    assert_eq!(
+        compose.to,
+        "Maya Chen <maya@fastmail.test>, Sam Okafor <sam@buildkite.test>, "
+    );
+    // The trailing comma is no recipient: the message can go, and the
+    // confirmation shows the two of them.
+    model.apply(Action::RequestSend).unwrap();
+    assert_eq!(
+        model.confirm_send.as_ref().unwrap().to,
+        "Maya Chen <maya@fastmail.test>, Sam Okafor <sam@buildkite.test>"
+    );
+}
+
+#[test]
+fn cc_has_suggestions_of_its_own_and_esc_closes_them() {
+    let (mut model, _folder) = model();
+    model.apply(Action::NewMessage).unwrap();
+    model.compose.as_mut().unwrap().cc = "pri".into();
+    model.apply(Action::SuggestRecipients(Field::Cc)).unwrap();
+    assert_eq!(suggested(&model), ["priya@lumen.example"]);
+    model.apply(Action::DismissSuggestions).unwrap();
+    let compose = model.compose.as_ref().unwrap();
+    assert!(compose.suggestions.is_none());
+    assert_eq!(compose.cc, "pri", "what was typed stays");
+    assert_eq!(compose.focus, Some(Field::Cc), "typing carries on there");
+
+    model.apply(Action::SuggestRecipients(Field::Cc)).unwrap();
+    model.apply(Action::AcceptSuggestion(None)).unwrap();
+    assert_eq!(
+        model.compose.as_ref().unwrap().cc,
+        "Priya Raman <priya@lumen.example>, "
+    );
+}
+
+#[test]
+fn suggestions_come_from_the_account_being_written_from() {
+    let (mut model, _folder) = two_accounts();
+    model.apply(Action::NewMessage).unwrap();
+    let from = model.compose.as_ref().unwrap().from.clone();
+    assert_eq!(from, demo::ADDRESS);
+    type_to(&mut model, "len");
+    assert!(suggested(&model).is_empty(), "Lena writes to the other one");
+    model
+        .apply(Action::SetFrom(demo::WORK_ADDRESS.into()))
+        .unwrap();
+    type_to(&mut model, "len");
+    assert_eq!(suggested(&model), ["lena@studio.example"]);
+}
+
+#[test]
+fn quick_look_previews_the_files_of_the_message_on_screen() {
+    let (mut model, _folder) = model();
+    select(&mut model, "Your e-ticket: London to Edinburgh");
+    model.apply(Action::QuickLook).unwrap();
+    let [
+        Effect::Preview {
+            account,
+            attachments,
+            ..
+        },
+    ] = model.effects.as_slice()
+    else {
+        panic!("expected a preview, got {:?}", model.effects);
+    };
+    assert_eq!(account, demo::ADDRESS);
+    assert_eq!(attachments[0].filename, "eticket-QX741K.pdf");
+    model.effects.clear();
+
+    // One file can be asked for by itself, as its menu does.
+    model
+        .apply(Action::Preview {
+            message: 0,
+            attachment: 0,
+        })
+        .unwrap();
+    assert!(matches!(
+        model.effects.as_slice(),
+        [Effect::Preview { attachments, .. }] if attachments.len() == 1
+    ));
+    model.effects.clear();
+    model
+        .apply(Action::Preview {
+            message: 0,
+            attachment: 5,
+        })
+        .unwrap();
+    assert!(model.effects.is_empty());
+
+    select(&mut model, "Dinner Friday?");
+    model.apply(Action::QuickLook).unwrap();
+    assert!(model.effects.is_empty());
+    assert_eq!(model.notice(), Some("No attachments to preview here."));
+}
+
+#[test]
+fn quick_look_leaves_out_pictures_the_original_already_shows() {
+    let (mut model, _folder) = model();
+    let logo = Attachment {
+        part_id: "1".into(),
+        filename: "logo.png".into(),
+        mime_type: "image/png".into(),
+        shown_in_html: true,
+        ..Attachment::default()
+    };
+    let ticket = Attachment {
+        part_id: "2".into(),
+        filename: "ticket.pdf".into(),
+        mime_type: "application/pdf".into(),
+        ..Attachment::default()
+    };
+    open_new(
+        &mut model,
+        Message {
+            gmail_id: "booking".into(),
+            thread_id: "booking".into(),
+            subject: "Booking".into(),
+            from_addr: "desk@hotel.example".into(),
+            body_html: Some(r#"<img src="cid:logo"><p>See you soon.</p>"#.into()),
+            attachments: vec![logo, ticket],
+            ..Message::default()
+        },
+    );
+    model.effects.clear();
+    assert!(model.showing_original().is_some());
+    model.apply(Action::QuickLook).unwrap();
+    let names = |model: &Model| match model.effects.as_slice() {
+        [Effect::Preview { attachments, .. }] => attachments
+            .iter()
+            .map(|file| file.filename.clone())
+            .collect::<Vec<_>>(),
+        other => panic!("expected a preview, got {other:?}"),
+    };
+    assert_eq!(names(&model), ["ticket.pdf"]);
+
+    // Read as text, the picture is a file like any other.
+    model.effects.clear();
+    model.apply(Action::ToggleOriginal).unwrap();
+    model.apply(Action::QuickLook).unwrap();
+    assert_eq!(names(&model), ["logo.png", "ticket.pdf"]);
+}

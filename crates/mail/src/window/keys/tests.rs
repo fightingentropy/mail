@@ -320,3 +320,143 @@ fn a_first_key_is_dropped_when_focus_moves() {
         act(Action::ToggleStar)
     );
 }
+
+#[test]
+fn command_u_asks_to_unsubscribe_and_enter_confirms() {
+    let mut keys = keys();
+    assert_eq!(
+        keys.command(&command(Key::U), Focus::List),
+        act(Action::Unsubscribe)
+    );
+    // ⇧⌘U is still read or unread.
+    assert_eq!(
+        keys.command(&shift_command(Key::U), Focus::List),
+        act(Action::ToggleUnread)
+    );
+    let asking = Focus::ConfirmUnsubscribe;
+    assert_eq!(
+        keys.command(&key(Key::Enter), asking),
+        act(Action::ConfirmUnsubscribe)
+    );
+    assert_eq!(
+        keys.command(&key(Key::Escape), asking),
+        act(Action::CancelUnsubscribe)
+    );
+    // Nothing else reaches the mailbox while it asks.
+    assert_eq!(keys.command(&key(Key::E), asking), None);
+    assert_eq!(keys.command(&Press::Text("#".into()), asking), None);
+}
+
+#[test]
+fn command_y_previews_attachments() {
+    let mut keys = keys();
+    assert_eq!(
+        keys.command(&command(Key::Y), Focus::List),
+        act(Action::QuickLook)
+    );
+}
+
+#[test]
+fn the_palette_opens_with_its_shortcut_and_keeps_letters_for_itself() {
+    let mut keys = keys();
+    assert_eq!(
+        keys.command(&shift_command(Key::P), Focus::List),
+        Some(Command::OpenPalette)
+    );
+    let open = Focus::Palette;
+    assert_eq!(keys.command(&key(Key::E), open), None, "typed, not archive");
+    assert_eq!(keys.command(&Press::Text("#".into()), open), None);
+    assert_eq!(
+        keys.command(&key(Key::ArrowDown), open),
+        Some(Command::PaletteMove(1))
+    );
+    assert_eq!(
+        keys.command(&key(Key::ArrowUp), open),
+        Some(Command::PaletteMove(-1))
+    );
+    assert_eq!(
+        keys.command(&key(Key::Enter), open),
+        Some(Command::PaletteRun)
+    );
+    assert_eq!(
+        keys.command(&key(Key::Escape), open),
+        Some(Command::ClosePalette)
+    );
+    // Its own shortcut closes it; other chords do nothing behind it.
+    assert_eq!(
+        keys.command(&shift_command(Key::P), open),
+        Some(Command::ClosePalette)
+    );
+    assert_eq!(keys.command(&command(Key::Backspace), open), None);
+    assert_eq!(keys.command(&command(Key::R), open), None);
+}
+
+#[test]
+fn suggested_recipients_take_the_arrows_enter_and_tab() {
+    let mut keys = keys();
+    let listed = Focus::Suggestions;
+    assert_eq!(
+        keys.command(&key(Key::ArrowDown), listed),
+        act(Action::MoveSuggestion(1))
+    );
+    assert_eq!(
+        keys.command(&key(Key::ArrowUp), listed),
+        act(Action::MoveSuggestion(-1))
+    );
+    for choose in [Key::Enter, Key::Tab] {
+        assert_eq!(
+            keys.command(&key(choose), listed),
+            act(Action::AcceptSuggestion(None))
+        );
+    }
+    assert_eq!(
+        keys.command(&key(Key::Escape), listed),
+        act(Action::DismissSuggestions),
+        "Esc closes the list, not the message"
+    );
+    // Typing goes on, and the compose shortcuts still work.
+    assert_eq!(keys.command(&key(Key::E), listed), None);
+    assert_eq!(
+        keys.command(&command(Key::Enter), listed),
+        act(Action::RequestSend)
+    );
+    assert_eq!(
+        keys.command(&command(Key::S), listed),
+        act(Action::SaveDraft)
+    );
+}
+
+#[test]
+fn every_action_has_a_name_of_its_own_in_the_saved_file() {
+    let mut ids: Vec<&str> = Bindable::ALL.iter().map(|bindable| bindable.id()).collect();
+    ids.sort_unstable();
+    let count = ids.len();
+    ids.dedup();
+    assert_eq!(ids.len(), count);
+    for bindable in Bindable::ALL {
+        assert_eq!(Bindable::from_id(bindable.id()), Some(bindable));
+    }
+}
+
+#[test]
+fn no_two_default_shortcuts_clash_within_a_scope() {
+    let keymap = Keymap::defaults();
+    for first in Bindable::ALL {
+        for second in Bindable::ALL {
+            if first >= second || first.scope() != second.scope() {
+                continue;
+            }
+            for a in keymap.shortcuts(first) {
+                for b in keymap.shortcuts(second) {
+                    assert!(
+                        !a.clashes_with(b),
+                        "{} and {} share {}",
+                        first.label(),
+                        second.label(),
+                        a.display()
+                    );
+                }
+            }
+        }
+    }
+}

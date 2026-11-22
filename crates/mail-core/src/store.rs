@@ -5,6 +5,7 @@
 
 mod bodies;
 mod changes;
+mod contacts;
 mod schema;
 mod search;
 mod threads;
@@ -15,6 +16,7 @@ use anyhow::{Context, ensure};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 use crate::model::{Account, Attachment, BodyLink, Label, LabelKind, Message};
+pub use contacts::Contact;
 pub use search::{Order, SearchHit, SearchQuery};
 pub use threads::ThreadFilter;
 
@@ -261,8 +263,9 @@ impl Store {
                     account_id, gmail_id, thread_id, internal_date, subject, from_name,
                     from_addr, to_addrs, cc_addrs, snippet, body_text,
                     message_id_header, in_reply_to, references_header, size_estimate,
-                    body_pending, body_links
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                    body_pending, body_links, list_unsubscribe, unsubscribe_one_click
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                    ?18, ?19)
                  ON CONFLICT (account_id, gmail_id) DO UPDATE SET
                     thread_id = excluded.thread_id,
                     internal_date = excluded.internal_date,
@@ -278,7 +281,9 @@ impl Store {
                     references_header = excluded.references_header,
                     size_estimate = excluded.size_estimate,
                     body_pending = excluded.body_pending,
-                    body_links = excluded.body_links
+                    body_links = excluded.body_links,
+                    list_unsubscribe = excluded.list_unsubscribe,
+                    unsubscribe_one_click = excluded.unsubscribe_one_click
                  RETURNING id",
             )?;
             let mut clear_labels =
@@ -312,6 +317,8 @@ impl Store {
                         message.size_estimate,
                         message.body_pending,
                         links_to_json(&message.body_links)?,
+                        message.list_unsubscribe,
+                        message.unsubscribe_one_click,
                     ],
                     |row| row.get(0),
                 )?;
@@ -387,6 +394,23 @@ impl Store {
         }
         transaction.commit()?;
         Ok(deleted)
+    }
+
+    /// Records how a stored message's sender takes an unsubscribe request,
+    /// once asked of the mailbox. Sync stores it with new mail.
+    pub fn save_unsubscribe(
+        &self,
+        account_id: i64,
+        gmail_id: &str,
+        list_unsubscribe: &str,
+        one_click: bool,
+    ) -> anyhow::Result<()> {
+        self.connection.execute(
+            "UPDATE messages SET list_unsubscribe = ?3, unsubscribe_one_click = ?4
+             WHERE account_id = ?1 AND gmail_id = ?2",
+            params![account_id, gmail_id, list_unsubscribe, one_click],
+        )?;
+        Ok(())
     }
 
     /// Gmail IDs of stored messages received at or after `since` (Unix ms).
@@ -501,7 +525,8 @@ impl Store {
 const SELECT_MESSAGE: &str = "SELECT id, gmail_id, thread_id, internal_date, subject, from_name,
     from_addr, to_addrs, cc_addrs, snippet, body_text,
     EXISTS (SELECT 1 FROM message_bodies b WHERE b.message_id = messages.id), message_id_header,
-    in_reply_to, references_header, size_estimate, body_pending, body_links FROM messages";
+    in_reply_to, references_header, size_estimate, body_pending, body_links, list_unsubscribe,
+    unsubscribe_one_click FROM messages";
 
 fn message_from_row(row: &Row) -> rusqlite::Result<(i64, Message)> {
     let message = Message {
@@ -524,6 +549,8 @@ fn message_from_row(row: &Row) -> rusqlite::Result<(i64, Message)> {
         references: row.get(14)?,
         size_estimate: row.get(15)?,
         body_pending: row.get(16)?,
+        list_unsubscribe: row.get(18)?,
+        unsubscribe_one_click: row.get(19)?,
         label_ids: Vec::new(),
         attachments: Vec::new(),
     };

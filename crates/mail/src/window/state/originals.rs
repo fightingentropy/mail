@@ -13,7 +13,10 @@ use std::{
     thread,
 };
 
-use mail_core::{gmail::inline, store::Store};
+use mail_core::{
+    gmail::{inline, trackers},
+    store::Store,
+};
 
 /// What showing a message's original needs, before the remote-images choice.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,11 +27,13 @@ pub(super) struct Built {
     pub inline: usize,
     /// The Content-IDs of pictures it shows that Mail doesn't have yet.
     pub missing: Vec<String>,
+    /// How many tracking pixels were taken out of it.
+    pub trackers: usize,
 }
 
-/// A message's HTML with the pictures sent inside it that Mail has. The
-/// worker and the window's own fallback both call this, so both give the
-/// same page.
+/// A message's HTML without its tracking pixels and with the pictures sent
+/// inside it that Mail has. The worker and the window's own fallback both
+/// call this, so both give the same page.
 pub(super) fn build(
     store: &Store,
     account_id: i64,
@@ -37,6 +42,7 @@ pub(super) fn build(
     let Some(html) = store.message_html(account_id, message_id)? else {
         return Ok(None);
     };
+    let (html, trackers) = trackers::strip(&html);
     let wanted = inline::content_ids(&html);
     let images = if wanted.is_empty() {
         Vec::new()
@@ -51,6 +57,7 @@ pub(super) fn build(
         html: Arc::from(inline::embed(&html, &images).as_ref()),
         inline: images.len(),
         missing,
+        trackers,
     }))
 }
 
@@ -262,6 +269,7 @@ mod tests {
             html: Arc::from("x".repeat(bytes).as_str()),
             inline: 0,
             missing: Vec::new(),
+            trackers: 0,
         }
     }
 

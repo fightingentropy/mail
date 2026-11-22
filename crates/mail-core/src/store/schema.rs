@@ -167,6 +167,13 @@ pub(super) const MIGRATIONS: &[&str] = &[
            OR lower(a.mime_type) = 'application/octet-stream'
     );
     "#,
+    // 8. How each message's sender takes an unsubscribe request: its
+    // List-Unsubscribe header, and whether one POST is enough. NULL for mail
+    // stored before this, which Mail asks Gmail about when you unsubscribe.
+    r#"
+    ALTER TABLE messages ADD COLUMN list_unsubscribe TEXT;
+    ALTER TABLE messages ADD COLUMN unsubscribe_one_click INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub(super) const LATEST: i64 = MIGRATIONS.len() as i64;

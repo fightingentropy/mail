@@ -10,6 +10,7 @@ mod client;
 mod html;
 pub mod inline;
 mod message;
+pub mod trackers;
 
 use serde::Deserialize;
 

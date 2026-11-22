@@ -11,12 +11,14 @@ use std::{
 
 use mail_core::{
     compose::Draft,
-    gmail::inline,
+    gmail::{inline, trackers},
     model::{Account, Attachment, Change, InlineImage, Label, LabelKind, Message, ThreadSummary},
-    store::{Order, SearchQuery, Store, ThreadFilter},
+    quotes,
+    store::{Contact, Order, SearchQuery, Store, ThreadFilter},
+    unsubscribe::{self, Method},
 };
 
-use super::compose::Compose;
+use super::compose::{Compose, Field};
 use originals::{Built, Loaded, Loader, Request};
 
 /// How long a selected unread thread stays on screen before it counts as read.
@@ -54,6 +56,9 @@ impl Action {
                 | Action::Archive
                 | Action::Trash
                 | Action::DiscardDraft
+                | Action::QuickLook
+                | Action::Unsubscribe
+                | Action::ConfirmUnsubscribe
         )
     }
 }
@@ -80,6 +85,8 @@ pub enum Action {
     ToggleHelp,
     CloseHelp,
     ToggleExpanded(usize),
+    /// Shows or hides the earlier message quoted under one in the thread.
+    ToggleQuoted(usize),
     Reply,
     ReplyAll,
     NewMessage,
@@ -104,6 +111,37 @@ pub enum Action {
         message: usize,
         attachment: usize,
     },
+    /// Previews the files sent with the message on screen, without saving
+    /// them to Downloads.
+    QuickLook,
+    /// Previews one file: the open thread's message and attachment.
+    Preview {
+        message: usize,
+        attachment: usize,
+    },
+    /// Asks to leave the mailing list the open conversation came from.
+    Unsubscribe,
+    /// How a sender takes unsubscribe requests, read from the mailbox for
+    /// mail stored before Mail kept it: the header and whether one request
+    /// is enough, `None` if the message is gone, or why it couldn't be read.
+    UnsubscribeFound {
+        account_id: i64,
+        message_id: String,
+        headers: Result<Option<(String, bool)>, String>,
+    },
+    ConfirmUnsubscribe,
+    CancelUnsubscribe,
+    /// The request went, or why it didn't.
+    Unsubscribed {
+        sender: String,
+        result: Result<(), String>,
+    },
+    /// What is typed in To or Cc changed: list the people it could be.
+    SuggestRecipients(Field),
+    MoveSuggestion(isize),
+    /// Fills in the highlighted suggestion, or the one clicked.
+    AcceptSuggestion(Option<usize>),
+    DismissSuggestions,
     /// Shows the newest expanded message's HTML in the browser.
     OpenHtml,
     /// Switches between a message's original layout and its text.
@@ -151,6 +189,25 @@ pub enum Effect {
     OpenHtml {
         message_id: String,
         html: String,
+    },
+    /// Download these files somewhere temporary and show them in Quick Look.
+    Preview {
+        account: String,
+        message_id: String,
+        attachments: Vec<Attachment>,
+    },
+    /// Read a message's unsubscribe headers from the mailbox.
+    FindUnsubscribe {
+        account: String,
+        account_id: i64,
+        message_id: String,
+    },
+    /// Send the unsubscribe request you confirmed: one POST, or an email
+    /// from `account`.
+    Unsubscribe {
+        account: String,
+        sender: String,
+        method: Method,
     },
     /// Save to Gmail's Drafts, replacing the draft with this ID if there is one.
     /// `from` is the address of the account the draft belongs to.
@@ -207,6 +264,17 @@ pub struct SendSummary {
     pub subject: String,
 }
 
+/// Who an unsubscribe request is about and how it would go, as the
+/// confirmation shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnsubscribeSummary {
+    /// The sender's name, or their address when they give none.
+    pub sender: String,
+    /// The address of your account the mail came to.
+    pub account: String,
+    pub method: Method,
+}
+
 /// A message's HTML, for showing it as it was designed.
 pub struct OriginalHtml {
     pub message_id: String,
@@ -219,6 +287,8 @@ pub struct OriginalHtml {
     pub inline: usize,
     /// The Content-IDs of pictures it shows that Mail doesn't have yet.
     missing: Vec<String>,
+    /// How many tracking pixels Mail took out of it.
+    pub trackers: usize,
 }
 
 /// The thread in the reader.
@@ -237,7 +307,43 @@ pub struct OpenThread {
     pub subject: String,
     pub messages: Vec<Message>,
     pub expanded: Vec<bool>,
+    /// For each message, where in its text the earlier message it quotes
+    /// starts. The reader folds from there.
+    pub quoted_from: Vec<Option<usize>>,
+    /// The messages whose quoted part is unfolded.
+    pub quotes_shown: Vec<bool>,
+    /// How to leave the list this came from, as far as stored mail says.
+    /// The reader offers Unsubscribe when there is a way.
+    pub unsubscribe: Option<Method>,
 }
+
+/// Where each message's quote of an earlier one starts.
+fn quote_starts(messages: &[Message]) -> Vec<Option<usize>> {
+    messages
+        .iter()
+        .map(|message| quotes::quoted_from(&message.subject, &message.body_text))
+        .collect()
+}
+
+/// The message an unsubscribe is about: the newest someone else sent.
+fn list_message<'a>(messages: &'a [Message], own_address: &str) -> Option<&'a Message> {
+    messages.iter().rev().find(|message| {
+        !message.has_label("DRAFT") && !message.from_addr.eq_ignore_ascii_case(own_address)
+    })
+}
+
+/// How a message's sender takes unsubscribe requests: as its headers say,
+/// else the page its own words link to.
+fn unsubscribe_method(message: &Message) -> Option<Method> {
+    message
+        .list_unsubscribe
+        .as_deref()
+        .and_then(|header| unsubscribe::from_headers(header, message.unsubscribe_one_click))
+        .or_else(|| unsubscribe::from_body(&message.body_text, &message.body_links))
+}
+
+/// What the toast says while a message's headers are read.
+const CHECKING_UNSUBSCRIBE: &str = "Checking how to unsubscribe…";
 
 impl OpenThread {
     /// Whether its original is still being built.
@@ -267,12 +373,19 @@ fn original_html(built: Built, message_id: &str, images: bool) -> OriginalHtml {
         images,
         inline: built.inline,
         missing: built.missing,
+        trackers: built.trackers,
     }
 }
 
 pub struct Picker {
     pub filter: String,
     pub highlighted: usize,
+}
+
+/// A To or Cc line as the confirmation shows it: the recipients, a comma
+/// and a space between each.
+fn tidy_recipients(list: &str) -> String {
+    mail_core::compose::split_address_list(list).join(", ")
 }
 
 /// Enough to put a thread back the way it was.
@@ -359,6 +472,13 @@ pub struct Model {
     pub compose: Option<Compose>,
     /// What ⌘Enter is about to send, shown for confirmation.
     pub confirm_send: Option<SendSummary>,
+    /// The unsubscribe request waiting for your confirmation.
+    pub confirm_unsubscribe: Option<UnsubscribeSummary>,
+    /// The message whose unsubscribe headers were asked of the mailbox.
+    unsubscribe_lookup: Option<(i64, String)>,
+    /// The people in the mail of the account being written from, for To
+    /// and Cc. Read when the first letter of a recipient is typed.
+    contacts: Option<Vec<Contact>>,
     /// Waiting for the shell, oldest first.
     pub effects: Vec<Effect>,
     undo: Option<Undo>,
@@ -399,6 +519,9 @@ impl Model {
             wants_sync: false,
             compose: None,
             confirm_send: None,
+            confirm_unsubscribe: None,
+            unsubscribe_lookup: None,
+            contacts: None,
             effects: Vec::new(),
             undo: None,
             viewed_since: None,
@@ -684,6 +807,7 @@ impl Model {
                 match self.reply_target().zip(own) {
                     Some((message, own)) => {
                         self.compose = Some(Compose::reply(message, own, all));
+                        self.contacts = None;
                     }
                     None => self.notify("Nothing to reply to.".into()),
                 }
@@ -695,6 +819,7 @@ impl Model {
                 // From the account shown, or the first when all are.
                 if let Some(from) = self.header_account() {
                     self.compose = Some(Compose::new_message(&from.email));
+                    self.contacts = None;
                 }
             }
             Action::SetFrom(address) => self.set_from(&address),
@@ -795,6 +920,82 @@ impl Model {
                     .and_then(|open| open.expanded.get_mut(index))
                 {
                     *expanded = !*expanded;
+                }
+            }
+            Action::ToggleQuoted(index) => {
+                if let Some(shown) = self
+                    .open
+                    .as_mut()
+                    .and_then(|open| open.quotes_shown.get_mut(index))
+                {
+                    *shown = !*shown;
+                }
+            }
+            Action::QuickLook => self.quick_look(),
+            Action::Preview {
+                message,
+                attachment,
+            } => {
+                let found = self.open.as_ref().and_then(|open| {
+                    let message = open.messages.get(message)?;
+                    let attachment = message.attachments.get(attachment)?.clone();
+                    Some((open.account_id, message.gmail_id.clone(), attachment))
+                });
+                if let Some((account, message_id, attachment)) = found {
+                    self.effects.push(Effect::Preview {
+                        account: self.own_address(account).to_owned(),
+                        message_id,
+                        attachments: vec![attachment],
+                    });
+                }
+            }
+            Action::Unsubscribe => self.unsubscribe(),
+            Action::UnsubscribeFound {
+                account_id,
+                message_id,
+                headers,
+            } => self.unsubscribe_found(account_id, message_id, headers)?,
+            Action::ConfirmUnsubscribe => {
+                if let Some(summary) = self.confirm_unsubscribe.take() {
+                    match summary.method {
+                        Method::Page(url) => {
+                            self.effects.push(Effect::OpenLink(url));
+                            self.notify("Opened their unsubscribe page in your browser.".into());
+                        }
+                        method => {
+                            self.effects.push(Effect::Unsubscribe {
+                                account: summary.account,
+                                sender: summary.sender,
+                                method,
+                            });
+                            self.notify("Unsubscribing…".into());
+                        }
+                    }
+                }
+            }
+            Action::CancelUnsubscribe => self.confirm_unsubscribe = None,
+            Action::Unsubscribed { sender, result } => match result {
+                Ok(()) => {
+                    self.notify(format!("Unsubscribed from {sender}."));
+                    // A request sent as an email is in Sent now.
+                    self.wants_sync = true;
+                }
+                Err(error) => self.notify(format!("Could not unsubscribe: {error}")),
+            },
+            Action::SuggestRecipients(field) => self.suggest_recipients(field)?,
+            Action::MoveSuggestion(step) => {
+                if let Some(compose) = &mut self.compose {
+                    compose.move_suggestion(step);
+                }
+            }
+            Action::AcceptSuggestion(index) => {
+                if let Some(compose) = &mut self.compose {
+                    compose.accept_suggestion(index);
+                }
+            }
+            Action::DismissSuggestions => {
+                if let Some(compose) = &mut self.compose {
+                    compose.dismiss_suggestions();
                 }
             }
             Action::OpenLink(url) => self.effects.push(Effect::OpenLink(url)),
@@ -1006,6 +1207,9 @@ impl Model {
             return;
         }
         let old = compose.from.clone();
+        // The people to suggest are the new account's.
+        self.contacts = None;
+        compose.suggestions = None;
         if let Some(draft_id) = compose.change_from(address) {
             self.effects.push(Effect::DiscardDraft {
                 from: old,
@@ -1040,10 +1244,155 @@ impl Model {
         let from = (self.accounts.len() > 1).then(|| compose.from.clone());
         self.confirm_send = Some(SendSummary {
             from,
-            to: draft.to,
-            cc: draft.cc,
+            // Without the comma a filled-in recipient leaves at the end.
+            to: tidy_recipients(&draft.to),
+            cc: tidy_recipients(&draft.cc),
             subject: draft.subject,
         });
+    }
+
+    /// Lists the people the recipient being typed in `field` could be, from
+    /// the mail of the account the message is written from.
+    fn suggest_recipients(&mut self, field: Field) -> anyhow::Result<()> {
+        let Some(compose) = &mut self.compose else {
+            return Ok(());
+        };
+        if self.contacts.is_none() {
+            let account = self
+                .accounts
+                .iter()
+                .find(|account| account.email == compose.from);
+            self.contacts = Some(match account {
+                Some(account) => self.store.contacts(account)?,
+                None => Vec::new(),
+            });
+        }
+        compose.suggest(field, self.contacts.as_deref().unwrap_or_default());
+        Ok(())
+    }
+
+    /// Previews the files of the message on screen: the newest expanded one
+    /// that has any. A picture the original shows is already on the page.
+    fn quick_look(&mut self) {
+        let on_page = self.showing_original().is_some();
+        let found = self.open.as_ref().and_then(|open| {
+            open.messages
+                .iter()
+                .zip(&open.expanded)
+                .rev()
+                .map(|(message, expanded)| {
+                    let files: Vec<Attachment> = message
+                        .attachments
+                        .iter()
+                        .filter(|file| *expanded && !(on_page && file.shown_in_html))
+                        .cloned()
+                        .collect();
+                    (message, files)
+                })
+                .find(|(_, files)| !files.is_empty())
+                .map(|(message, files)| (open.account_id, message.gmail_id.clone(), files))
+        });
+        match found {
+            Some((account, message_id, attachments)) => self.effects.push(Effect::Preview {
+                account: self.own_address(account).to_owned(),
+                message_id,
+                attachments,
+            }),
+            None => self.notify("No attachments to preview here.".into()),
+        }
+    }
+
+    /// Starts an unsubscribe from the newest message someone else sent in
+    /// the open conversation. Nothing is sent until `ConfirmUnsubscribe`.
+    /// Mail stored before Mail kept the headers is asked of the mailbox
+    /// first; `UnsubscribeFound` carries on from there.
+    fn unsubscribe(&mut self) {
+        let found = self.open.as_ref().and_then(|open| {
+            let own = self.own_address(open.account_id);
+            let message = list_message(&open.messages, own)?;
+            Some((open.account_id, own.to_owned(), message.clone()))
+        });
+        let Some((account_id, account, message)) = found else {
+            self.notify("Nothing to unsubscribe from here.".into());
+            return;
+        };
+        if message.list_unsubscribe.is_none() {
+            self.unsubscribe_lookup = Some((account_id, message.gmail_id.clone()));
+            self.effects.push(Effect::FindUnsubscribe {
+                account,
+                account_id,
+                message_id: message.gmail_id,
+            });
+            self.notify(CHECKING_UNSUBSCRIBE.into());
+            return;
+        }
+        self.ask_to_unsubscribe(&account, &message);
+    }
+
+    /// Shows the confirmation for `message`, or says it gives no way.
+    fn ask_to_unsubscribe(&mut self, account: &str, message: &Message) {
+        let Some(method) = unsubscribe_method(message) else {
+            self.notify("This sender gives no way to unsubscribe.".into());
+            return;
+        };
+        let sender = if message.from_name.trim().is_empty() {
+            message.from_addr.clone()
+        } else {
+            message.from_name.trim().to_owned()
+        };
+        self.confirm_unsubscribe = Some(UnsubscribeSummary {
+            sender,
+            account: account.to_owned(),
+            method,
+        });
+    }
+
+    /// The mailbox answered about a message's unsubscribe headers. They are
+    /// kept, and the confirmation shows if that message is still the one on
+    /// screen. Without an answer its own words may still link to a page.
+    fn unsubscribe_found(
+        &mut self,
+        account_id: i64,
+        message_id: String,
+        headers: Result<Option<(String, bool)>, String>,
+    ) -> anyhow::Result<()> {
+        let asked = self.unsubscribe_lookup.take();
+        if self.notice() == Some(CHECKING_UNSUBSCRIBE) {
+            self.notice = None;
+        }
+        if let Ok(Some((header, one_click))) = &headers {
+            self.store
+                .save_unsubscribe(account_id, &message_id, header, *one_click)?;
+        }
+        if asked != Some((account_id, message_id.clone())) {
+            return Ok(());
+        }
+        let account = self.own_address(account_id).to_owned();
+        let on_screen = self.open.as_mut().and_then(|open| {
+            let own = account.as_str();
+            let at = (open.account_id == account_id)
+                .then(|| open.messages.iter().position(|m| m.gmail_id == message_id))??;
+            let is_newest = list_message(&open.messages, own)
+                .is_some_and(|message| message.gmail_id == message_id);
+            if let Ok(Some((header, one_click))) = &headers {
+                open.messages[at].list_unsubscribe = Some(header.clone());
+                open.messages[at].unsubscribe_one_click = *one_click;
+            }
+            if is_newest {
+                open.unsubscribe = unsubscribe_method(&open.messages[at]);
+            }
+            is_newest.then(|| open.messages[at].clone())
+        });
+        let Some(message) = on_screen else {
+            return Ok(());
+        };
+        match (headers, unsubscribe_method(&message)) {
+            (Err(error), None) => {
+                self.notify(format!("Could not check how to unsubscribe: {error}"));
+            }
+            _ => self.ask_to_unsubscribe(&account, &message),
+        }
+        Ok(())
     }
 
     /// The message a reply answers: the newest one in the open thread that
@@ -1076,6 +1425,8 @@ impl Model {
                 .store
                 .message_html(open.account_id, message_id)?
                 .map(|html| -> anyhow::Result<String> {
+                    // The browser loads remote images, so the pixels go here too.
+                    let (html, _) = trackers::strip(&html);
                     let images = self.store.inline_images(open.account_id, message_id)?;
                     Ok(inline::embed(&html, &images).into_owned())
                 })
@@ -1208,9 +1559,14 @@ impl Model {
         {
             // Same thread: refresh messages and labels but keep what is expanded.
             let messages = self.store.thread(account, &summary.thread_id)?;
+            let own = self.own_address(account).to_owned();
             if let Some(open) = &mut self.open
                 && open.messages.len() == messages.len()
             {
+                // A body that has arrived since may quote, or say how to
+                // unsubscribe.
+                open.quoted_from = quote_starts(&messages);
+                open.unsubscribe = list_message(&messages, &own).and_then(unsubscribe_method);
                 open.messages = messages;
                 return Ok(());
             }
@@ -1226,15 +1582,20 @@ impl Model {
             [message] if message.has_html => Some(message.gmail_id.clone()),
             _ => None,
         };
-        self.open = Some(OpenThread {
+        let own = self.own_address(account);
+        let open = OpenThread {
             account_id: account,
             original: None,
             loading: None,
             thread_id: summary.thread_id.clone(),
             subject: summary.subject.clone(),
+            quoted_from: quote_starts(&messages),
+            quotes_shown: vec![false; messages.len()],
+            unsubscribe: list_message(&messages, own).and_then(unsubscribe_method),
             messages,
             expanded,
-        });
+        };
+        self.open = Some(open);
         if let Some(message_id) = original_id {
             self.start_original(account, message_id)?;
         }

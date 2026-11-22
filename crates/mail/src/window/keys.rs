@@ -26,6 +26,12 @@ pub enum Focus {
     Compose,
     /// The send confirmation is showing.
     ConfirmSend,
+    /// The unsubscribe confirmation is showing.
+    ConfirmUnsubscribe,
+    /// The command palette is open.
+    Palette,
+    /// Suggested recipients are listed under To or Cc.
+    Suggestions,
     Settings,
 }
 
@@ -45,6 +51,11 @@ pub enum Command {
     ScrollReader(f32),
     SyncNow,
     OpenSettings,
+    OpenPalette,
+    ClosePalette,
+    PaletteMove(isize),
+    /// Runs the highlighted command.
+    PaletteRun,
 }
 
 /// Which keys a shortcut competes with: the mailbox's, or the compose
@@ -92,6 +103,8 @@ pub enum Bindable {
     Undo,
     OpenHtml,
     ToggleOriginal,
+    QuickLook,
+    Unsubscribe,
     ScrollDown,
     ScrollUp,
     Reply,
@@ -107,13 +120,14 @@ pub enum Bindable {
     GoDrafts,
     GoAllMail,
     Sync,
+    Commands,
     Shortcuts,
     Settings,
 }
 
 impl Bindable {
     /// In the order the overlay and Settings list them.
-    pub const ALL: [Bindable; 27] = [
+    pub const ALL: [Bindable; 30] = [
         Bindable::Next,
         Bindable::Previous,
         Bindable::Archive,
@@ -124,6 +138,8 @@ impl Bindable {
         Bindable::Undo,
         Bindable::OpenHtml,
         Bindable::ToggleOriginal,
+        Bindable::QuickLook,
+        Bindable::Unsubscribe,
         Bindable::ScrollDown,
         Bindable::ScrollUp,
         Bindable::Reply,
@@ -139,6 +155,7 @@ impl Bindable {
         Bindable::GoDrafts,
         Bindable::GoAllMail,
         Bindable::Sync,
+        Bindable::Commands,
         Bindable::Shortcuts,
         Bindable::Settings,
     ];
@@ -156,6 +173,8 @@ impl Bindable {
             Bindable::Undo => "undo",
             Bindable::OpenHtml => "open_html",
             Bindable::ToggleOriginal => "toggle_original",
+            Bindable::QuickLook => "quick_look",
+            Bindable::Unsubscribe => "unsubscribe",
             Bindable::ScrollDown => "scroll_down",
             Bindable::ScrollUp => "scroll_up",
             Bindable::Reply => "reply",
@@ -171,6 +190,7 @@ impl Bindable {
             Bindable::GoDrafts => "go_drafts",
             Bindable::GoAllMail => "go_all_mail",
             Bindable::Sync => "sync",
+            Bindable::Commands => "commands",
             Bindable::Shortcuts => "shortcuts",
             Bindable::Settings => "settings",
         }
@@ -188,6 +208,8 @@ impl Bindable {
             Bindable::Undo => "Undo",
             Bindable::OpenHtml => "Open the HTML version in your browser",
             Bindable::ToggleOriginal => "Show the original or the text",
+            Bindable::QuickLook => "Preview the attachments",
+            Bindable::Unsubscribe => "Unsubscribe from the sender",
             Bindable::ScrollDown => "Scroll down",
             Bindable::ScrollUp => "Scroll up",
             Bindable::Reply => "Reply",
@@ -203,6 +225,7 @@ impl Bindable {
             Bindable::GoDrafts => "Go to Drafts",
             Bindable::GoAllMail => "Go to All mail",
             Bindable::Sync => "Sync now",
+            Bindable::Commands => "Find a command",
             Bindable::Shortcuts => "Show shortcuts",
             Bindable::Settings => "Settings",
         }
@@ -230,6 +253,7 @@ impl Bindable {
             | Bindable::GoDrafts
             | Bindable::GoAllMail
             | Bindable::Sync
+            | Bindable::Commands
             | Bindable::Shortcuts
             | Bindable::Settings => Section::MovingAround,
             _ => Section::Conversations,
@@ -250,6 +274,8 @@ impl Bindable {
             Bindable::Undo => act(Action::Undo),
             Bindable::OpenHtml => act(Action::OpenHtml),
             Bindable::ToggleOriginal => act(Action::ToggleOriginal),
+            Bindable::QuickLook => act(Action::QuickLook),
+            Bindable::Unsubscribe => act(Action::Unsubscribe),
             Bindable::ScrollDown => Command::ScrollReader(1.0),
             Bindable::ScrollUp => Command::ScrollReader(-1.0),
             Bindable::Reply => act(Action::Reply),
@@ -265,6 +291,7 @@ impl Bindable {
             Bindable::GoDrafts => show("DRAFT"),
             Bindable::GoAllMail => show("ALL"),
             Bindable::Sync => Command::SyncNow,
+            Bindable::Commands => Command::OpenPalette,
             Bindable::Shortcuts => act(Action::ToggleHelp),
             Bindable::Settings => Command::OpenSettings,
         }
@@ -283,6 +310,8 @@ impl Bindable {
             Bindable::Undo => &["z", "cmd+z"],
             Bindable::OpenHtml => &["h"],
             Bindable::ToggleOriginal => &["v"],
+            Bindable::QuickLook => &["cmd+y"],
+            Bindable::Unsubscribe => &["cmd+u"],
             Bindable::ScrollDown => &["space"],
             Bindable::ScrollUp => &["shift+space"],
             Bindable::Reply => &["r", "cmd+r"],
@@ -298,6 +327,7 @@ impl Bindable {
             Bindable::GoDrafts => &["g d"],
             Bindable::GoAllMail => &["g a"],
             Bindable::Sync => &["shift+cmd+n"],
+            Bindable::Commands => &["shift+cmd+p"],
             Bindable::Shortcuts => &["/", "?"],
             Bindable::Settings => &["cmd+,"],
         }
@@ -722,6 +752,40 @@ impl Keys {
                 Press::Key(Key::Enter, _) => Some(Command::Act(Action::ConfirmSend)),
                 Press::Key(Key::Escape, _) => Some(Command::Act(Action::CancelSend)),
                 _ => None,
+            },
+            Focus::ConfirmUnsubscribe => match press {
+                Press::Key(Key::Enter, _) => Some(Command::Act(Action::ConfirmUnsubscribe)),
+                Press::Key(Key::Escape, _) => Some(Command::Act(Action::CancelUnsubscribe)),
+                _ => None,
+            },
+            // Letters go to its field; its own shortcut closes it again.
+            Focus::Palette => match press {
+                Press::Key(Key::Escape, _) => Some(Command::ClosePalette),
+                Press::Key(Key::ArrowDown, _) => Some(Command::PaletteMove(1)),
+                Press::Key(Key::ArrowUp, _) => Some(Command::PaletteMove(-1)),
+                Press::Key(Key::Enter, _) => Some(Command::PaletteRun),
+                Press::Key(_, modifiers) if Mods::from(*modifiers).commanding() => {
+                    match self.mapped(press, Scope::Mail, now) {
+                        Some(Bindable::Commands) => Some(Command::ClosePalette),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            // The keys that choose a suggestion; every other key is the
+            // compose panel's, so typing and ⌘↩ work as ever.
+            Focus::Suggestions => match press {
+                Press::Key(Key::Escape, _) => Some(Command::Act(Action::DismissSuggestions)),
+                Press::Key(Key::ArrowDown, _) => Some(Command::Act(Action::MoveSuggestion(1))),
+                Press::Key(Key::ArrowUp, _) => Some(Command::Act(Action::MoveSuggestion(-1))),
+                Press::Key(Key::Enter | Key::Tab, modifiers)
+                    if !Mods::from(*modifiers).commanding() =>
+                {
+                    Some(Command::Act(Action::AcceptSuggestion(None)))
+                }
+                _ => self
+                    .mapped(press, Scope::Compose, now)
+                    .map(Bindable::command),
             },
             // The overlay closes itself on Esc or a click outside, and on
             // its own shortcut.

@@ -393,6 +393,8 @@ impl GmailApi for GmailClient {
             ("metadataHeaders", "Message-ID"),
             ("metadataHeaders", "In-Reply-To"),
             ("metadataHeaders", "References"),
+            ("metadataHeaders", "List-Unsubscribe"),
+            ("metadataHeaders", "List-Unsubscribe-Post"),
         ];
         self.get(&format!("messages/{id}"), &query, METADATA_MESSAGE_UNITS)
     }

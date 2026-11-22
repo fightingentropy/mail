@@ -11,6 +11,7 @@ use std::{collections::HashMap, ops::Range, path::PathBuf};
 use mail_core::{
     model::{Account, Attachment, BodyLink, LabelKind, Message, ThreadSummary},
     paths::Paths,
+    unsubscribe::Method,
 };
 
 use super::{
@@ -18,9 +19,12 @@ use super::{
     icloud_form::{self, IcloudForm},
     keys::{Bindable, Command, Focus, Keymap, Keys, Press},
     links,
+    palette::{self, CommandPalette},
     preferences::Preferences,
     shortcuts::{self, Settings},
-    state::{Action, MAILBOXES, Model, OpenThread, OriginalHtml, SendSummary, View},
+    state::{
+        Action, MAILBOXES, Model, OpenThread, OriginalHtml, SendSummary, UnsubscribeSummary, View,
+    },
     theme::{self, Palette},
     toast::{self, Toast},
 };
@@ -48,6 +52,8 @@ pub struct Screen {
     preferences: Preferences,
     preferences_path: PathBuf,
     settings: Option<Settings>,
+    /// The command palette while it is open.
+    palette: Option<CommandPalette>,
     /// "Add iCloud account…" while it is open.
     pub icloud_form: Option<IcloudForm>,
     toast: Toast,
@@ -81,6 +87,7 @@ impl Screen {
             preferences,
             preferences_path: Preferences::path(&paths),
             settings: None,
+            palette: None,
             icloud_form: None,
             toast: Toast::default(),
             paths,
@@ -171,9 +178,7 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
             };
             match &mut model.compose {
                 Some(compose) => {
-                    if let Some(address) = compose::draw(ui, compose, &screen.keys.keymap, &from) {
-                        actions.push(Action::SetFrom(address));
-                    }
+                    compose::draw(ui, compose, &screen.keys.keymap, &from, &mut actions)
                 }
                 None => reader(ui, model, screen, &mut actions),
             }
@@ -211,6 +216,23 @@ pub fn draw(ui: &mut egui::Ui, model: &mut Model, screen: &mut Screen) {
     if let Some(summary) = &model.confirm_send {
         confirm_send(ui.ctx(), summary, &mut actions);
     }
+    if let Some(summary) = &model.confirm_unsubscribe {
+        confirm_unsubscribe(ui.ctx(), summary, &mut actions);
+    }
+    if let Some(open) = &mut screen.palette {
+        let entries = palette::entries(model, &screen.keys.keymap);
+        let matches = palette::matching(entries, &open.query);
+        match palette::draw(ui.ctx(), open, &matches) {
+            palette::Outcome::Open => {}
+            palette::Outcome::Closed => screen.palette = None,
+            palette::Outcome::Run(commands) => {
+                screen.palette = None;
+                for command in commands {
+                    run_command(ui.ctx(), screen, command, None, &mut actions);
+                }
+            }
+        }
+    }
     if let Some(form) = &mut screen.icloud_form
         && !icloud_form::draw(ui.ctx(), form, &mut actions)
     {
@@ -246,14 +268,22 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
     }
     let focus = if screen.settings.is_some() {
         Focus::Settings
+    } else if screen.palette.is_some() {
+        Focus::Palette
     } else if model.help {
         Focus::Help
     } else if model.picker.is_some() {
         Focus::Picker
     } else if model.confirm_send.is_some() {
         Focus::ConfirmSend
-    } else if model.compose.is_some() {
-        Focus::Compose
+    } else if model.confirm_unsubscribe.is_some() {
+        Focus::ConfirmUnsubscribe
+    } else if let Some(compose) = &model.compose {
+        if compose.suggestions.is_some() {
+            Focus::Suggestions
+        } else {
+            Focus::Compose
+        }
     } else if screen.search_focused {
         Focus::Search
     } else {
@@ -271,33 +301,68 @@ fn handle_keys(ctx: &egui::Context, model: &Model, screen: &mut Screen, actions:
         return;
     }
     for (press, repeat) in held {
-        match screen.keys.command(&press, focus) {
-            Some(Command::Act(action)) => {
-                // Keep send keys away from the text fields: ⌘Enter and the
-                // confirming Enter must not also type a new line.
-                if matches!(action, Action::RequestSend | Action::ConfirmSend)
-                    && let Press::Key(key, modifiers) = press
-                {
-                    ctx.input_mut(|input| input.consume_key(modifiers, key));
+        if let Some(command) = screen.keys.command(&press, focus) {
+            // A held key must not confirm a send or trash a run of threads.
+            let held_too_long =
+                repeat && matches!(&command, Command::Act(action) if action.once_per_press());
+            if !held_too_long {
+                run_command(ctx, screen, command, Some(&press), actions);
+            }
+        }
+    }
+}
+
+/// Carries out what a key press or a palette entry asked for. `press` is
+/// the key that asked, when one did.
+fn run_command(
+    ctx: &egui::Context,
+    screen: &mut Screen,
+    command: Command,
+    press: Option<&Press>,
+    actions: &mut Vec<Action>,
+) {
+    match command {
+        Command::Act(action) => {
+            // Keep these keys away from the text fields: ⌘Enter and the
+            // confirming Enter must not also type a new line, and the keys
+            // that choose a suggested recipient must not move the cursor
+            // or leave the field.
+            let sends = matches!(action, Action::RequestSend | Action::ConfirmSend);
+            let chooses = matches!(
+                action,
+                Action::AcceptSuggestion(_) | Action::MoveSuggestion(_)
+            );
+            if (sends || chooses)
+                && let Some(Press::Key(key, modifiers)) = press
+            {
+                ctx.input_mut(|input| input.consume_key(*modifiers, *key));
+                if sends {
                     ctx.memory_mut(|memory| memory.stop_text_input());
                 }
-                // A held key must not confirm a send or trash a run of threads.
-                if !(repeat && action.once_per_press()) {
-                    actions.push(action);
-                }
             }
-            Some(Command::FocusSearch) => screen.focus_search = true,
-            Some(Command::FocusList) => {
-                ctx.memory_mut(|memory| memory.surrender_focus(search_id()))
+            actions.push(action);
+        }
+        Command::FocusSearch => screen.focus_search = true,
+        Command::FocusList => ctx.memory_mut(|memory| memory.surrender_focus(search_id())),
+        Command::ScrollReader(direction) => {
+            let page = (screen.reader_height * 0.85).max(200.0);
+            screen.reader_target = Some((screen.reader_offset + direction * page).max(0.0));
+            screen.scroll_original = Some(direction);
+        }
+        Command::SyncNow => screen.sync_requested = true,
+        Command::OpenSettings => screen.settings = Some(Settings::default()),
+        Command::OpenPalette => screen.palette = Some(CommandPalette::default()),
+        Command::ClosePalette => screen.palette = None,
+        Command::PaletteMove(step) => {
+            if let Some(palette) = &mut screen.palette {
+                // Clamped to the matches when it is drawn.
+                palette.highlighted = palette.highlighted.saturating_add_signed(step);
             }
-            Some(Command::ScrollReader(direction)) => {
-                let page = (screen.reader_height * 0.85).max(200.0);
-                screen.reader_target = Some((screen.reader_offset + direction * page).max(0.0));
-                screen.scroll_original = Some(direction);
+        }
+        Command::PaletteRun => {
+            if let Some(palette) = &mut screen.palette {
+                palette.run = true;
             }
-            Some(Command::SyncNow) => screen.sync_requested = true,
-            Some(Command::OpenSettings) => screen.settings = Some(Settings::default()),
-            None => {}
         }
     }
 }
@@ -1013,11 +1078,14 @@ fn conversation_menu(
             ("Reply", Bindable::Reply, Action::Reply),
             ("Reply all", Bindable::ReplyAll, Action::ReplyAll),
         ],
-        &[(
-            "Open the HTML version",
-            Bindable::OpenHtml,
-            Action::OpenHtml,
-        )],
+        &[
+            (
+                "Open the HTML version",
+                Bindable::OpenHtml,
+                Action::OpenHtml,
+            ),
+            ("Unsubscribe…", Bindable::Unsubscribe, Action::Unsubscribe),
+        ],
     ];
     for (index, group) in groups.into_iter().enumerate() {
         if index > 0 {
@@ -1138,22 +1206,37 @@ fn reader(ui: &mut egui::Ui, model: &Model, screen: &mut Screen, actions: &mut V
                             .font(theme::regular(13.0))
                             .color(palette.dim),
                     );
-                } else if screen.original_available
-                    && (open.original.is_some() || open.loading_original())
-                {
+                } else {
                     // A message with an original, read as text for now.
-                    ui.add_space(8.0);
-                    let toggle = screen.keys.keymap.hint(Bindable::ToggleOriginal);
-                    if pill_button(ui, ButtonIcon::Original, "Show original", &toggle).clicked() {
-                        actions.push(Action::ToggleOriginal);
+                    let has_original = screen.original_available
+                        && (open.original.is_some() || open.loading_original());
+                    if has_original || open.unsubscribe.is_some() {
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let keymap = &screen.keys.keymap;
+                            let toggle = keymap.hint(Bindable::ToggleOriginal);
+                            if has_original
+                                && pill_button(ui, ButtonIcon::Original, "Show original", &toggle)
+                                    .clicked()
+                            {
+                                actions.push(Action::ToggleOriginal);
+                            }
+                            if open.unsubscribe.is_some() && unsubscribe_button(ui, keymap) {
+                                actions.push(Action::Unsubscribe);
+                            }
+                        });
                     }
                 }
                 ui.add_space(18.0);
 
                 for (index, message) in open.messages.iter().enumerate() {
                     let expanded = open.expanded.get(index).copied().unwrap_or(true);
+                    let quote = Quote {
+                        from: open.quoted_from.get(index).copied().flatten(),
+                        shown: open.quotes_shown.get(index).copied().unwrap_or(false),
+                    };
                     let toggled = if expanded {
-                        expanded_message(ui, index, message, own_address, actions)
+                        expanded_message(ui, index, message, own_address, quote, actions)
                     } else {
                         collapsed_message(ui, message, own_address)
                     };
@@ -1215,6 +1298,9 @@ fn original_reader(
     // higher. The text view is a key press away, so it needs no button.
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if open.unsubscribe.is_some() && unsubscribe_button(ui, &screen.keys.keymap) {
+                actions.push(Action::Unsubscribe);
+            }
             if !original.images
                 && pill_button(ui, ButtonIcon::Picture, "Load images", "")
                     .on_hover_text(
@@ -1224,6 +1310,23 @@ fn original_reader(
                     .clicked()
             {
                 actions.push(Action::LoadImages);
+            }
+            if original.trackers > 0 {
+                let noun = if original.trackers == 1 {
+                    "tracker"
+                } else {
+                    "trackers"
+                };
+                ui.label(
+                    RichText::new(format!("{} {noun} blocked", original.trackers))
+                        .font(theme::regular(13.0))
+                        .color(palette.dim),
+                )
+                .on_hover_text(
+                    "Hidden images that tell the sender when you open this. \
+                     Mail took them out before showing it.",
+                );
+                ui.add_space(10.0);
             }
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 ui.add(
@@ -1242,11 +1345,10 @@ fn original_reader(
     if message.attachments.iter().any(|file| !file.shown_in_html) {
         ui.horizontal_wrapped(|ui| {
             for (number, file) in message.attachments.iter().enumerate() {
-                if !file.shown_in_html && attachment_chip(ui, file) {
-                    actions.push(Action::Download {
-                        message: 0,
-                        attachment: number,
-                    });
+                if !file.shown_in_html {
+                    let preview = screen.keys.keymap.menu_hint(Bindable::QuickLook);
+                    let chosen = attachment_chip(ui, file, &preview);
+                    actions.extend(chosen.map(|choice| choice.action(0, number)));
                 }
             }
         });
@@ -1270,11 +1372,22 @@ fn original_reader(
     screen.original_rect = Some(page);
 }
 
+/// "Unsubscribe" as a quiet button, with its shortcut. Returns true when
+/// clicked.
+fn unsubscribe_button(ui: &mut egui::Ui, keymap: &Keymap) -> bool {
+    let key = keymap.menu_hint(Bindable::Unsubscribe);
+    pill_button(ui, ButtonIcon::Stop, "Unsubscribe", &key)
+        .on_hover_text("Ask this sender to stop writing. Mail shows how before anything is sent.")
+        .clicked()
+}
+
 enum ButtonIcon {
     /// A framed picture with a hill and a sun.
     Picture,
     /// A page with a banner across its top, as designed mail has.
     Original,
+    /// A circle with a line through it.
+    Stop,
 }
 
 /// A quiet rounded button: a small icon, its words and, when the action has
@@ -1351,6 +1464,10 @@ fn pill_button(ui: &mut egui::Ui, icon: ButtonIcon, text: &str, key: &str) -> eg
             );
             line(&[(-4.0, 1.0), (4.0, 1.0)]);
             line(&[(-4.0, 3.5), (1.0, 3.5)]);
+        }
+        ButtonIcon::Stop => {
+            painter.circle_stroke(center, 6.0, stroke);
+            line(&[(-4.2, -4.2), (4.2, 4.2)]);
         }
     }
 
@@ -1438,11 +1555,20 @@ fn message_header(
         .clicked()
 }
 
+/// The earlier message a reply quotes: where it starts in the reply's
+/// text, and whether the reader has unfolded it.
+#[derive(Clone, Copy)]
+struct Quote {
+    from: Option<usize>,
+    shown: bool,
+}
+
 fn expanded_message(
     ui: &mut egui::Ui,
     index: usize,
     message: &Message,
     own_address: &str,
+    quote: Quote,
     actions: &mut Vec<Action>,
 ) -> bool {
     let palette = theme::palette(ui.ctx());
@@ -1470,8 +1596,22 @@ fn expanded_message(
     } else {
         (message.body_text.as_str(), message.body_links.as_slice())
     };
-    if let Some(url) = body(ui, body_text, link_words) {
+    // The quote starts at a place in the body text, not in a snippet.
+    let quoted_from = quote
+        .from
+        .filter(|&from| !message.body_text.trim().is_empty() && body_text.is_char_boundary(from));
+    let shown = match quoted_from {
+        Some(from) if !quote.shown => body_text[..from].trim_end(),
+        _ => body_text,
+    };
+    if let Some(url) = body(ui, shown, link_words) {
         actions.push(Action::OpenLink(url));
+    }
+    if quoted_from.is_some() {
+        ui.add_space(8.0);
+        if quote_toggle(ui, quote.shown) {
+            actions.push(Action::ToggleQuoted(index));
+        }
     }
     if message.body_pending {
         ui.add_space(8.0);
@@ -1486,16 +1626,41 @@ fn expanded_message(
         ui.add_space(14.0);
         ui.horizontal_wrapped(|ui| {
             for (number, attachment) in message.attachments.iter().enumerate() {
-                if attachment_chip(ui, attachment) {
-                    actions.push(Action::Download {
-                        message: index,
-                        attachment: number,
-                    });
-                }
+                let chosen = attachment_chip(ui, attachment, "");
+                actions.extend(chosen.map(|choice| choice.action(index, number)));
             }
         });
     }
     toggled
+}
+
+/// Three dots that unfold the earlier message a reply quotes, and fold it
+/// again. Returns true when clicked.
+fn quote_toggle(ui: &mut egui::Ui, shown: bool) -> bool {
+    let palette = theme::palette(ui.ctx());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(36.0, 20.0), Sense::click());
+    let fill = if response.hovered() || shown {
+        palette.selected
+    } else {
+        palette.field
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
+    for offset in [-7.0, 0.0, 7.0] {
+        ui.painter().circle_filled(
+            rect.center() + Vec2::new(offset, 0.0),
+            1.8,
+            palette.secondary,
+        );
+    }
+    let hint = if shown {
+        "Hide the quoted message"
+    } else {
+        "Show the quoted message"
+    };
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(hint)
+        .clicked()
 }
 
 /// A message body as selectable text, with web and email links in the
@@ -1671,8 +1836,39 @@ fn underline(galley: &egui::Galley, chars: Range<usize>) -> Vec<(f32, f32, f32)>
     spans
 }
 
-/// An attachment's name and size. Returns true when clicked.
-fn attachment_chip(ui: &mut egui::Ui, attachment: &Attachment) -> bool {
+/// What was asked of an attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileChoice {
+    /// Save it to Downloads and open it.
+    Save,
+    /// Show it in Quick Look, saving nothing.
+    Preview,
+}
+
+impl FileChoice {
+    /// The action for the open thread's `message` and its `attachment`.
+    fn action(self, message: usize, attachment: usize) -> Action {
+        match self {
+            FileChoice::Save => Action::Download {
+                message,
+                attachment,
+            },
+            FileChoice::Preview => Action::Preview {
+                message,
+                attachment,
+            },
+        }
+    }
+}
+
+/// An attachment's name and size. A click saves and opens it; a right
+/// click offers a preview too, with `preview_key` beside it when that
+/// shortcut would preview this file.
+fn attachment_chip(
+    ui: &mut egui::Ui,
+    attachment: &Attachment,
+    preview_key: &str,
+) -> Option<FileChoice> {
     let palette = theme::palette(ui.ctx());
     let padding = Vec2::new(12.0, 8.0);
     let gap = 8.0;
@@ -1716,13 +1912,28 @@ fn attachment_chip(ui: &mut egui::Ui, attachment: &Attachment) -> bool {
         size,
         palette.dim,
     );
-    response
+    let response = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(format!(
-            "Save {} to Downloads and open it",
+            "Save {} to Downloads and open it. Right-click to preview it first.",
             attachment.filename
-        ))
-        .clicked()
+        ));
+    let mut choice = response.clicked().then_some(FileChoice::Save);
+    response.context_menu(|ui| {
+        ui.set_min_width(210.0);
+        let preview = egui::Button::new(RichText::new("Quick Look").font(theme::regular(14.5)))
+            .shortcut_text(RichText::new(preview_key).font(theme::regular(13.5)));
+        if ui.add(preview).clicked() {
+            choice = Some(FileChoice::Preview);
+            ui.close();
+        }
+        let save = egui::Button::new(RichText::new("Save to Downloads").font(theme::regular(14.5)));
+        if ui.add(save).clicked() {
+            choice = Some(FileChoice::Save);
+            ui.close();
+        }
+    });
+    choice
 }
 
 fn collapsed_message(ui: &mut egui::Ui, message: &Message, own_address: &str) -> bool {
@@ -1930,6 +2141,82 @@ fn confirm_send(ctx: &egui::Context, summary: &SendSummary, actions: &mut Vec<Ac
         });
     if response.should_close() {
         actions.push(Action::CancelSend);
+    }
+}
+
+/// Shows where an unsubscribe request would go, and what goes with it,
+/// before anything is sent.
+fn confirm_unsubscribe(
+    ctx: &egui::Context,
+    summary: &UnsubscribeSummary,
+    actions: &mut Vec<Action>,
+) {
+    let palette = theme::palette(ctx);
+    let to = summary.method.destination();
+    let (how, confirm) = match &summary.method {
+        Method::OneClick(_) => (
+            format!(
+                "Mail will send one request to {to}. Nothing of yours goes with it, \
+                 and there is nothing more to do."
+            ),
+            "Unsubscribe   ↩",
+        ),
+        Method::Email(_) => (
+            format!(
+                "Mail will send an email from {} to {to}, asking them to stop. \
+                 It will be in your Sent mail.",
+                summary.account
+            ),
+            "Send request   ↩",
+        ),
+        Method::Page(_) => (
+            format!("Their unsubscribe page at {to} will open in your browser, to finish there."),
+            "Open page   ↩",
+        ),
+    };
+    let response = egui::Modal::new(Id::new("confirm-unsubscribe"))
+        .frame(overlay_frame(palette))
+        .show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!("Unsubscribe from {}?", summary.sender))
+                        .font(theme::semibold(18.0)),
+                )
+                .wrap(),
+            );
+            ui.add_space(10.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(how)
+                        .font(theme::regular(14.5))
+                        .color(palette.secondary),
+                )
+                .wrap(),
+            );
+            ui.add_space(18.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(RichText::new("Cancel   Esc").font(theme::regular(14.5)))
+                    .clicked()
+                {
+                    actions.push(Action::CancelUnsubscribe);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let go = egui::Button::new(
+                        RichText::new(confirm)
+                            .font(theme::semibold(14.5))
+                            .color(palette.background),
+                    )
+                    .fill(palette.accent);
+                    if ui.add(go).clicked() {
+                        actions.push(Action::ConfirmUnsubscribe);
+                    }
+                });
+            });
+        });
+    if response.should_close() {
+        actions.push(Action::CancelUnsubscribe);
     }
 }
 

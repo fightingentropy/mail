@@ -815,6 +815,8 @@ fn messages_that_may_show_their_own_pictures_are_read_again() {
             .connection()
             .execute_batch(
                 "ALTER TABLE attachments DROP COLUMN shown_in_html;
+                 ALTER TABLE messages DROP COLUMN list_unsubscribe;
+                 ALTER TABLE messages DROP COLUMN unsubscribe_one_click;
                  PRAGMA user_version = 6;",
             )
             .unwrap();
@@ -862,4 +864,36 @@ fn inline_pictures_are_kept_with_their_message() {
         .query_row("SELECT count(*) FROM inline_images", [], |row| row.get(0))
         .unwrap();
     assert_eq!(left, 0, "they go with the message");
+}
+
+#[test]
+fn how_to_unsubscribe_is_kept_with_a_message() {
+    let (mut store, account) = store_with_mail();
+    // Stored before Mail kept it: unknown, not "none".
+    let old = store.message(account, "m1").unwrap().unwrap();
+    assert_eq!(old.list_unsubscribe, None);
+    assert!(!old.unsubscribe_one_click);
+
+    let newsletter = Message {
+        gmail_id: "news".into(),
+        thread_id: "news".into(),
+        list_unsubscribe: Some("<https://news.example/u/1>".into()),
+        unsubscribe_one_click: true,
+        ..Message::default()
+    };
+    let letter = Message {
+        gmail_id: "letter".into(),
+        thread_id: "letter".into(),
+        list_unsubscribe: Some(String::new()),
+        ..Message::default()
+    };
+    store.save_messages(account, &[newsletter, letter]).unwrap();
+    let news = store.message(account, "news").unwrap().unwrap();
+    assert_eq!(
+        news.list_unsubscribe.as_deref(),
+        Some("<https://news.example/u/1>")
+    );
+    assert!(news.unsubscribe_one_click);
+    let letter = store.thread(account, "letter").unwrap().remove(0);
+    assert_eq!(letter.list_unsubscribe.as_deref(), Some(""));
 }

@@ -1,8 +1,8 @@
 //! Scripted key presses for demo screenshots, so the window's keyboard
 //! handling can be checked without a person at the keyboard.
 //!
-//! Steps are separated by spaces: a key name (`j`, `esc`, `enter`, `down`,
-//! `/`, `#`, `?`), a chord written as in `shortcuts.json` (`cmd+k`,
+//! Steps are separated by spaces: a key name (`j`, `esc`, `enter`, `tab`,
+//! `down`, `/`, `#`, `?`), a chord written as in `shortcuts.json` (`cmd+k`,
 //! `shift+cmd+n`, `cmd+backspace`), `text:` followed by characters to type
 //! (`_` for a space), `click:x,y`, `rightclick:x,y` and `hover:x,y` in
 //! points from the window's top left, or `wait` to let a frame pass.
@@ -47,6 +47,7 @@ fn step(token: &str) -> Vec<Event> {
         "down" => Some(Key::ArrowDown),
         "up" => Some(Key::ArrowUp),
         "space" => Some(Key::Space),
+        "tab" => Some(Key::Tab),
         _ => None,
     };
     if let Some(key) = named {

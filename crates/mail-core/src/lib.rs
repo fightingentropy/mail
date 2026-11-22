@@ -11,5 +11,7 @@ pub mod gmail;
 pub mod icloud;
 pub mod model;
 pub mod paths;
+pub mod quotes;
 pub mod store;
 pub mod sync;
+pub mod unsubscribe;

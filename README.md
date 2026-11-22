@@ -78,6 +78,8 @@ Gmail's letters and the usual macOS chords both work:
 | `u` | `⇧⌘U` | Mark read or unread |
 | `s` | `⇧⌘L` | Star or unstar |
 | `l` | | Add or remove a label |
+| | `⌘U` | Unsubscribe from the sender, after a confirmation |
+| | `⌘Y` | Preview the attachments in Quick Look |
 | `z` | `⌘Z` | Undo |
 | `r` / `a` / `c` | `⌘R` / `⇧⌘R` / `⌘N` | Reply, reply all, new message |
 | | `⌘K` | Search, live as you type |
@@ -88,6 +90,7 @@ Gmail's letters and the usual macOS chords both work:
 | | `⌘↩` | Send, after a confirmation showing who it goes to |
 | | `⌘S` / `⇧⌘D` | Save the draft to Gmail's Drafts / discard it |
 | | `⇧⌘N` | Sync now |
+| | `⇧⌘P` | Find a command by name |
 | `/` or `?` | | All shortcuts |
 | | `⌘,` | Settings |
 
@@ -100,6 +103,33 @@ action, and Reset puts the defaults back. Changes are saved to
 Right-click a conversation for the same actions, with their shortcuts.
 What you just did shows for a few seconds at the bottom right, with
 **Undo** after archiving, deleting or labelling.
+
+`⇧⌘P` opens the command palette: type a few letters of what you want
+(`arch`, `mark unread`, or the first letters of the words, as `gi` for Go
+to Inbox) and press Enter. It lists every action with its shortcut, plus
+the places shortcuts don't reach: Spam, Trash, each label and each account.
+
+### Writing to people
+
+To and Cc suggest people as you type: a name, a later word of it, an
+address or its site. The list comes from the mail already on your Mac, the
+people you write to most first, so it works offline and Mail never asks
+for your contacts. `↓` `↑` choose, Enter or Tab fills one in, Esc closes
+the list. Addresses that only send automated mail, such as `no-reply@`,
+are left out unless you have written to them.
+
+### Unsubscribing
+
+`⌘U`, or the **Unsubscribe** button on mail that offers a way, leaves a
+mailing list. Mail first shows where the request would go and what goes
+with it, and does nothing until you confirm. A sender that takes the
+request in one step gets one HTTPS request that carries nothing of yours;
+one that wants an email gets it from your account, and it shows in Sent;
+any other opens its unsubscribe page in your browser. The sender writes
+those addresses, so Mail sends the one-step request only to a public HTTPS
+site and never follows a redirect. Mail downloaded before this version
+doesn't say how its sender unsubscribes, so Mail asks your mailbox the
+first time and remembers the answer.
 
 ### Several accounts
 
@@ -135,13 +165,19 @@ designed, the way Gmail shows it, in macOS's own WebKit. Mail keeps control:
 scripts never run, and links open in your browser. Remote images load as the
 email opens. Loading them tells the sender you opened the message, so you can
 turn them off in Settings (`⌘,`); each email then has a **Load images**
-button instead. Pictures sent inside the email itself, such as a receipt's
+button instead. Either way Mail first takes out the images that exist only
+to report that you opened the email: remote images one pixel big or hidden,
+and the tracking images of common mailing and read-receipt services. The
+header says how many it blocked. Pictures sent inside the email itself, such as a receipt's
 logo, always show: they come from Gmail, not the sender, so they give
 nothing away. Mail reads them the first time you open the email and
 keeps them. Files sent with the email, such as a PDF ticket, are listed above
 it; as in Gmail, the pictures it shows aren't. `v` switches to the text
 reader, which lists every attachment, pictures too; Settings can make text
-the default. Conversations read as text.
+the default. Conversations read as text, and a reply folds away the
+earlier message it quotes, which is already on screen above it: click the
+three dots to see it. A forward, or a reply written between the quoted
+lines, stays whole.
 
 The text reader shows mail as plain text. Web and email links are in blue:
 hover one to see its full address, click to open it. Newsletters often send a
@@ -150,7 +186,10 @@ gaps and tracking links; Mail spots those and reads the HTML instead, so you
 get the words with "Track your order" itself clickable. A long address left
 in a message shows as just its site, such as `click.shop.example/…`. Click an attachment to save
 it to Downloads and open it; anything that could run code (apps, scripts,
-installers, archives) is shown in Finder instead of opened. For mail that
+installers, archives) is shown in Finder instead of opened. To look
+without saving, press `⌘Y` or right-click an attachment and choose **Quick
+Look**: documents, images and media open in macOS's own preview, from a
+temporary copy that is deleted when Mail quits. For mail that
 needs its layout, `h` opens the original HTML in your browser. Scripts are
 blocked there, but remote images load, which tells the sender you opened
 the message. The window follows macOS's light or dark appearance.
@@ -249,6 +288,9 @@ Mail's shape (a Rust engine with SQLite FTS5 search and a read-only agent
 CLI) follows my [Whatsapp](https://github.com/fightingentropy/Whatsapp)
 client, which extends Carmine Paolino's MIT-licensed
 [ZapFast](https://github.com/crmne/zapfast). Mail reuses patterns, not code.
+Blocking trackers, unsubscribing, folding quoted replies, the command
+palette and recipient suggestions are ideas from Miguel Piedrafita's
+[Exo](https://github.com/m1guelpf/Exo); each is written afresh here.
 
 Built on [SQLite](https://sqlite.org) via
 [rusqlite](https://github.com/rusqlite/rusqlite),

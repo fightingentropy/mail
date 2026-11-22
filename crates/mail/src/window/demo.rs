@@ -65,7 +65,7 @@ const MAILBOX: &[Mail] = &[
         hours_ago: 4,
         from: ("Alex Rivera", ADDRESS),
         subject: "Re: Code review: offline queue for triage",
-        body: "Good question. For v1 the status bar reports them after sync, and the next sync shows Gmail's state anyway. I'll add a log view if it turns out to matter.",
+        body: "Good question. For v1 the status bar reports them after sync, and the next sync shows Gmail's state anyway. I'll add a log view if it turns out to matter.\n\nOn Thu, 12 Nov 2026 at 09:14, Sam Okafor <sam@buildkite.test> wrote:\n> Looked through the pending-changes queue. The re-apply after sync is a nice touch; it fixes the flicker I saw when archiving during a sync.\n>\n> One question: should refused changes surface somewhere, or is dropping them silently enough for v1?",
         labels: &["SENT"],
         attachment: None,
         html: None,
@@ -75,7 +75,7 @@ const MAILBOX: &[Mail] = &[
         hours_ago: 2,
         from: ("Sam Okafor", "sam@buildkite.test"),
         subject: "Re: Code review: offline queue for triage",
-        body: "Works for me. Approved. Ship it.",
+        body: "Works for me. Approved. Ship it.\n\nOn Thu, 12 Nov 2026 at 10:02, Alex Rivera <you@example.com> wrote:\n> Good question. For v1 the status bar reports them after sync, and the next sync shows Gmail's state anyway. I'll add a log view if it turns out to matter.",
         labels: &["INBOX", "UNREAD", "Label_work"],
         attachment: None,
         html: None,
@@ -153,7 +153,12 @@ const NEWSLETTER_HTML: &str = r#"<!DOCTYPE html>
 <li><a href="https://rustweekly.example/issues/212#egui">What's new in egui 0.36</a></li>
 </ul>
 <p><a href="https://rustweekly.example/unsubscribe">Unsubscribe</a></p>
+<img src="https://rustweekly.example/open.gif?reader=demo" width="1" height="1" alt="">
 </body></html>"#;
+
+/// The newsletter says how to leave it, as mailing lists do: in one
+/// request, with nothing to click.
+const NEWSLETTER_UNSUBSCRIBE: &str = "<https://rustweekly.example/leave/demo>";
 
 const WORK_MAILBOX: &[Mail] = &[
     Mail {
@@ -272,6 +277,10 @@ fn seed_account(
                 .collect(),
             body_text: mail.body.into(),
             body_html: mail.html.map(str::to_owned),
+            // Only the newsletter is a mailing list; the rest say nothing,
+            // as mail stored by an older Mail does.
+            list_unsubscribe: mail.html.map(|_| NEWSLETTER_UNSUBSCRIBE.to_owned()),
+            unsubscribe_one_click: mail.html.is_some(),
             label_ids: mail.labels.iter().map(|label| (*label).into()).collect(),
             attachments: mail
                 .attachment

@@ -5,7 +5,8 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
@@ -28,6 +29,13 @@ pub enum Event {
         filename: String,
         error: String,
     },
+    /// Saved somewhere temporary, for Quick Look to show.
+    Previewed {
+        paths: Vec<PathBuf>,
+    },
+    PreviewFailed {
+        error: String,
+    },
     /// The pictures sent inside a message that Gmail had, or why none came.
     InlineImages {
         account_id: i64,
@@ -45,6 +53,8 @@ struct Job {
 
 enum Work {
     Attachment(Attachment),
+    /// These files, to look at without keeping them.
+    Preview(Vec<Attachment>),
     /// The pictures with these Content-IDs, for the account with this ID.
     InlineImages {
         account_id: i64,
@@ -59,12 +69,13 @@ pub struct Downloader {
 
 impl Downloader {
     /// `wake` is called when a download finishes, so the window can repaint.
-    pub fn start(paths: Paths, wake: impl Fn() + Send + 'static) -> Self {
+    /// Previewed files go under `preview_folder`.
+    pub fn start(paths: Paths, preview_folder: PathBuf, wake: impl Fn() + Send + 'static) -> Self {
         let (jobs, incoming) = mpsc::channel();
         let (outgoing, events) = mpsc::channel();
         thread::Builder::new()
             .name("downloads".into())
-            .spawn(move || run(paths, incoming, outgoing, wake))
+            .spawn(move || run(paths, preview_folder, incoming, outgoing, wake))
             .expect("could not start the download thread");
         Self { jobs, events }
     }
@@ -75,6 +86,16 @@ impl Downloader {
             account,
             message_id,
             work: Work::Attachment(attachment),
+        });
+    }
+
+    /// Queues downloading files somewhere temporary, to show in Quick
+    /// Look.
+    pub fn preview(&self, account: String, message_id: String, attachments: Vec<Attachment>) {
+        let _ = self.jobs.send(Job {
+            account,
+            message_id,
+            work: Work::Preview(attachments),
         });
     }
 
@@ -94,13 +115,19 @@ impl Downloader {
     }
 }
 
-fn run(paths: Paths, jobs: Receiver<Job>, events: Sender<Event>, wake: impl Fn()) {
+fn run(
+    paths: Paths,
+    preview_folder: PathBuf,
+    jobs: Receiver<Job>,
+    events: Sender<Event>,
+    wake: impl Fn(),
+) {
     // A Gmail client of its own: the sync thread's may be busy with a long
     // sync. Each keeps its own quota budget; an attachment costs 20 quota
     // units, a third of a message.
     let mut clients: HashMap<String, accounts::Client> = HashMap::new();
     for job in jobs {
-        let event = match carry_out(&paths, &mut clients, &job) {
+        let event = match carry_out(&paths, &preview_folder, &mut clients, &job) {
             Ok(event) => event,
             Err(error) => {
                 // Connect afresh next time: the token may have changed.
@@ -111,6 +138,7 @@ fn run(paths: Paths, jobs: Receiver<Job>, events: Sender<Event>, wake: impl Fn()
                         filename: attachment.filename.clone(),
                         error,
                     },
+                    Work::Preview(_) => Event::PreviewFailed { error },
                     Work::InlineImages { account_id, .. } => Event::InlineImages {
                         account_id: *account_id,
                         message_id: job.message_id.clone(),
@@ -128,6 +156,7 @@ fn run(paths: Paths, jobs: Receiver<Job>, events: Sender<Event>, wake: impl Fn()
 
 fn carry_out(
     paths: &Paths,
+    preview_folder: &Path,
     clients: &mut HashMap<String, accounts::Client>,
     job: &Job,
 ) -> anyhow::Result<Event> {
@@ -142,6 +171,27 @@ fn carry_out(
             let path = attachments::save(&folder, &attachment.filename, &bytes)
                 .with_context(|| format!("Could not save to {}", folder.display()))?;
             Ok(Event::Saved { path })
+        }
+        Work::Preview(attachments) => {
+            // A folder per message, made afresh, so a file shown before is
+            // never shown in place of this one.
+            let name: String = job
+                .message_id
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            let folder = preview_folder.join(format!("message-{name}"));
+            let _ = fs::remove_dir_all(&folder);
+            fs::create_dir_all(&folder)
+                .with_context(|| format!("Could not create {}", folder.display()))?;
+            let mut saved = Vec::new();
+            for attachment in attachments {
+                let bytes = attachments::fetch(&**gmail, &job.message_id, attachment)?;
+                let path = attachments::save(&folder, &attachment.filename, &bytes)
+                    .with_context(|| format!("Could not save to {}", folder.display()))?;
+                saved.push(path);
+            }
+            Ok(Event::Previewed { paths: saved })
         }
         Work::InlineImages { account_id, wanted } => Ok(Event::InlineImages {
             account_id: *account_id,

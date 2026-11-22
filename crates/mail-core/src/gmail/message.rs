@@ -10,7 +10,10 @@ use encoding_rs::{Encoding, UTF_8};
 use serde::Deserialize;
 
 use super::{html, inline};
-use crate::model::{Attachment, BodyLink, Message};
+use crate::{
+    model::{Attachment, BodyLink, Message},
+    unsubscribe,
+};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -163,6 +166,9 @@ pub fn parse_message(api: ApiMessage) -> Message {
         in_reply_to: header("In-Reply-To"),
         references: header("References"),
         size_estimate: api.size_estimate,
+        list_unsubscribe: Some(header("List-Unsubscribe").unwrap_or_default()),
+        unsubscribe_one_click: header("List-Unsubscribe-Post")
+            .is_some_and(|post| unsubscribe::offers_one_click(&post)),
         label_ids: api.label_ids,
         attachments,
     }

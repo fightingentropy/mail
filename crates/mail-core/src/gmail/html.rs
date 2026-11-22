@@ -123,7 +123,7 @@ pub fn to_text_with_links(html: &str) -> (String, Vec<BodyLink>) {
 
 /// Where the tag starting at `<` ends: the first `>` outside quotes, since
 /// attributes such as `alt="a > b"` may contain one.
-fn tag_end(tag: &str) -> Option<usize> {
+pub(super) fn tag_end(tag: &str) -> Option<usize> {
     let mut quote = None;
     for (index, c) in tag.char_indices() {
         match (quote, c) {
@@ -138,7 +138,7 @@ fn tag_end(tag: &str) -> Option<usize> {
 
 /// The value of `name="..."` (or single-quoted, or bare) inside a tag,
 /// with entities decoded.
-fn attribute(tag: &str, name: &str) -> Option<String> {
+pub(super) fn attribute(tag: &str, name: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
     let mut from = 0;
     while let Some(found) = lower[from..].find(name) {
@@ -281,7 +281,7 @@ fn tag_name(tag: &str) -> String {
 /// Byte offset of the first ASCII-case-insensitive match of `needle`. Looks
 /// at the haystack in place: copying the rest of the message for every
 /// skipped element made a message with many of them quadratic.
-fn find_ignoring_case(haystack: &str, needle: &str) -> Option<usize> {
+pub(super) fn find_ignoring_case(haystack: &str, needle: &str) -> Option<usize> {
     let needle = needle.as_bytes();
     haystack
         .as_bytes()
