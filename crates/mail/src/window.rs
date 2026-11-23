@@ -53,6 +53,8 @@ pub struct Options {
     /// Keys to press in the demo before the screenshot, such as `j e cmd+k text:seat`.
     pub demo_keys: Option<String>,
     /// Light or dark instead of following macOS, for screenshots of both.
+    /// Draw with OpenGL instead of Metal.
+    pub opengl: bool,
     pub appearance: Option<egui::Theme>,
 }
 
@@ -94,6 +96,8 @@ pub fn run(paths: &Paths, options: Options) -> anyhow::Result<()> {
         persistence_path: Some(paths.root.join("window")),
         ..Default::default()
     };
+    let mut native = native;
+    configure_renderer(&mut native, options.opengl);
     let demo = options.demo;
     let screenshot = options.screenshot;
     let script = script::parse(options.demo_keys.as_deref().unwrap_or_default());
@@ -825,4 +829,23 @@ fn save_png(path: &Path, image: &egui::ColorImage) -> anyhow::Result<()> {
         .context("The frame size did not match")?;
     buffer.save(path)?;
     Ok(())
+}
+
+/// Metal through wgpu, as in Whatsapp: Apple's backend only, the low-power GPU,
+/// and at most one frame in flight. OpenGL stays for comparison or recovery.
+fn configure_renderer(native: &mut eframe::NativeOptions, opengl: bool) {
+    if opengl {
+        native.renderer = eframe::Renderer::Glow;
+        return;
+    }
+    use eframe::egui_wgpu::{SurfaceConfig, WgpuSetup, WgpuSetupCreateNew};
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = wgpu::Backends::METAL;
+    setup.power_preference = wgpu::PowerPreference::LowPower;
+    native.renderer = eframe::Renderer::Wgpu;
+    native.wgpu_options.wgpu_setup = WgpuSetup::CreateNew(setup);
+    native.wgpu_options.surface = SurfaceConfig {
+        present_mode: wgpu::PresentMode::AutoNoVsync,
+        desired_maximum_frame_latency: Some(1),
+    };
 }

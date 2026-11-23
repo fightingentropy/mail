@@ -37,8 +37,17 @@ struct Cli {
     /// Draw the window light or dark instead of following macOS.
     #[arg(long, value_enum, hide = true)]
     appearance: Option<Appearance>,
+    /// Draw with OpenGL instead of Metal, for comparison or recovery.
+    #[arg(long, value_enum, hide = true, default_value_t = Renderer::Metal)]
+    renderer: Renderer,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Renderer {
+    Metal,
+    OpenGl,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -107,6 +116,7 @@ fn main() -> ExitCode {
                 demo: cli.demo,
                 screenshot: cli.screenshot,
                 demo_keys: cli.demo_keys,
+                opengl: cli.renderer == Renderer::OpenGl,
                 appearance: cli.appearance.map(|appearance| match appearance {
                     Appearance::Light => egui::Theme::Light,
                     Appearance::Dark => egui::Theme::Dark,

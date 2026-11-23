@@ -21,8 +21,10 @@ clap = { version = "4.5", features = ["derive"] }
 schemars = "1"
 # Formats message dates in the local time zone.
 jiff = "0.2"
-# The window. OpenGL only; persistence remembers the window's size and place.
-eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "persistence"] }
+# The window, drawn with Metal through wgpu; glow stays for `--renderer open-gl`.
+# Persistence remembers the window's size and place.
+eframe = { version = "0.36", default-features = false, features = ["glow", "wgpu_no_default_features", "default_fonts", "persistence"] }
+wgpu = { version = "30", default-features = false, features = ["std", "metal", "wgsl"] }
 egui = "0.36"
 # Shows a message's original HTML in the reader, in macOS's own WebKit.
 wry = { version = "0.57", default-features = false }
